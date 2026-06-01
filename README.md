@@ -1,5 +1,9 @@
 # PDF X_Ray - Structure & Layout Analyzer
 
+![Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-6.0-646CFF?logo=vite&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-Vanilla-F7DF1E?logo=javascript&logoColor=black)
+
 An advanced desktop application built on **Tauri v2** and **Vanilla Web Technologies** designed to parse PDF documents, extract hierarchical bookmarks, inspect logical structure tags (Tagged PDF), and perform real-time **Recursive XY-CUT** layout decomposition.
 
 ---
