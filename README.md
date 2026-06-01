@@ -91,3 +91,8 @@ npm.cmd run tauri build
 ```
 The compiled binaries will be outputted under:
 `src-tauri/target/release/`
+
+---
+
+## ⚖️ License
+This project is licensed under a custom license. See the [LICENSE](LICENSE) file for details.
