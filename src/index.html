@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF X-Ray</title>
+    <link rel="stylesheet" href="styles.css" />
+    <!-- Google Fonts: Outfit for titles and Inter for UI text -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app-container">
+      
+      <!-- COLUMN 1: LEFT SIDEBAR (Outline & Tagged PDF) -->
+      <aside class="sidebar left-sidebar glass" id="left-sidebar">
+        <div class="sidebar-header">
+          <div class="logo-area">
+            <span class="logo-icon">▲</span>
+            <h2>PDF X-Ray</h2>
+          </div>
+          <span class="sub-header">X-Ray Structure & Navigation</span>
+        </div>
+        
+        <!-- Tab Swapping Controls -->
+        <div class="tab-controls">
+          <button class="tab-btn active" id="tab-bookmarks" data-target="panel-bookmarks">
+            <svg class="tab-icon" viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
+            Bookmarks
+          </button>
+          <button class="tab-btn" id="tab-tagged" data-target="panel-tagged">
+            <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+            Tagged PDF
+          </button>
+        </div>
+
+        <div class="sidebar-content">
+          <!-- BOOKMARKS PANEL -->
+          <div class="tab-panel active" id="panel-bookmarks">
+            <div id="outline-tree" class="tree-root">
+              <div class="empty-state">No PDF document loaded. Use the open button to load a file.</div>
+            </div>
+          </div>
+          
+          <!-- TAGGED PDF PANEL -->
+          <div class="tab-panel" id="panel-tagged">
+            <div id="tagged-status-badge" class="status-badge untagged">Checking...</div>
+            <div id="tagged-tree" class="tree-root">
+              <div class="empty-state">No PDF structure tags available.</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+      <div class="resizer left-resizer" id="left-resizer"></div>
+
+      <!-- COLUMN 2: CENTER PANEL (Canvas, PDF render, visual cuts) -->
+      <main class="center-panel">
+        
+        <!-- Toolbar Panel -->
+        <header class="workspace-toolbar glass">
+          <div class="toolbar-group">
+            <button id="btn-open-file" class="btn primary-btn">
+              <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+              Apri PDF
+            </button>
+            <input type="file" id="file-selector" accept="application/pdf" style="display: none;" />
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <!-- Page Navigation -->
+          <div class="toolbar-group nav-group">
+            <button id="btn-prev-page" class="icon-btn" title="Pagina precedente">
+              <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 14-1.41L15.41 7.41z"/></svg>
+            </button>
+            <div class="page-counter">
+              <input type="number" id="input-page-num" min="1" value="1" />
+              <span>/</span>
+              <span id="txt-page-total">1</span>
+            </div>
+            <button id="btn-next-page" class="icon-btn" title="Pagina successiva">
+              <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6-6-6z"/></svg>
+            </button>
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <!-- Zoom Controls -->
+          <div class="toolbar-group zoom-group">
+            <button id="btn-zoom-out" class="icon-btn" title="Zoom out">
+              <svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+            </button>
+            <span id="txt-zoom-percent">100%</span>
+            <button id="btn-zoom-in" class="icon-btn" title="Zoom in">
+              <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            </button>
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <!-- Visualization Filters -->
+          <div class="toolbar-group vis-filters">
+            <label class="checkbox-container" title="Mostra i box delle parole estratti">
+              <input type="checkbox" id="chk-show-chars" checked />
+              <span class="checkmark"></span>
+              Words
+            </label>
+            <label class="checkbox-container" title="Mostra i box finali della segmentazione XY">
+              <input type="checkbox" id="chk-show-blocks" checked />
+              <span class="checkmark"></span>
+              Blocks
+            </label>
+            <label class="checkbox-container" title="Mostra le proiezioni e istogrammi dei vuoti">
+              <input type="checkbox" id="chk-show-projections" checked />
+              <span class="checkmark"></span>
+              Projections
+            </label>
+          </div>
+        </header>
+
+        <!-- Document Viewer Workspace -->
+        <div class="document-workspace" id="document-workspace">
+          <div class="canvas-viewport" id="canvas-viewport">
+            <!-- Loading Indicator -->
+            <div id="loading-spinner" class="spinner-overlay" style="display: none;">
+              <div class="spinner"></div>
+              <p>Elaborazione PDF in corso...</p>
+            </div>
+            
+            <!-- Canvas Container -->
+            <div class="canvas-container" id="canvas-container">
+              <canvas id="pdf-canvas"></canvas>
+              <canvas id="overlay-canvas"></canvas>
+            </div>
+          </div>
+        </div>
+      </main>
+      <div class="resizer right-resizer" id="right-resizer"></div>
+
+      <!-- COLUMN 3: RIGHT SIDEBAR (XY-Cut Sliders & Inspector) -->
+      <aside class="sidebar right-sidebar glass" id="right-sidebar">
+        
+        <!-- Section A: XY-Cut Config -->
+        <section class="config-section">
+          <h3>XY-Cut Parameters</h3>
+          <div class="control-grid">
+            
+            <!-- Auto-Detect Gutters -->
+            <div class="control-item">
+              <label class="checkbox-container" title="Abilita l'autodeterminazione automatica dei gutter tramite backend Rust">
+                <input type="checkbox" id="chk-auto-gutter" checked />
+                <span class="checkmark"></span>
+                Auto-Detect Gutters (Rust)
+              </label>
+            </div>
+
+            <!-- Auto-Detect Strategy -->
+            <div class="control-item" id="auto-strategy-container">
+              <div class="control-label">
+                <span>Auto Gutter Strategy</span>
+              </div>
+              <select id="select-auto-strategy" class="styled-select">
+                <option value="combined" selected>Combined Heuristics (Hybrid)</option>
+                <option value="delta-x">Strategy 1: Delta-X Histogram</option>
+                <option value="zero-run">Strategy 2: Zero-Run Projection</option>
+                <option value="dominant-font">Strategy 3: Dominant Font</option>
+              </select>
+            </div>
+
+            <!-- Y threshold slider -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Row Gap ($T_y$) [px]</span>
+                <span class="control-val" id="val-threshold-y">10 px</span>
+              </div>
+              <input type="range" id="range-threshold-y" min="2" max="60" value="10" />
+            </div>
+
+            <!-- X threshold slider -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Column Gap ($T_x$) [px]</span>
+                <span class="control-val" id="val-threshold-x">15 px</span>
+              </div>
+              <input type="range" id="range-threshold-x" min="2" max="60" value="15" />
+            </div>
+
+            <!-- Min Width -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Min Block Width [px]</span>
+                <span class="control-val" id="val-min-w">100 px</span>
+              </div>
+              <input type="range" id="range-min-w" min="0" max="500" value="100" />
+            </div>
+
+            <!-- Min Height -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Min Block Height [px]</span>
+                <span class="control-val" id="val-min-h">10 px</span>
+              </div>
+              <input type="range" id="range-min-h" min="5" max="50" value="10" />
+            </div>
+
+            <!-- Priority -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Priority Cut</span>
+              </div>
+              <select id="select-priority" class="styled-select">
+                <option value="Y" selected>Horizontal First (Rows)</option>
+                <option value="X">Vertical First (Columns)</option>
+                <option value="max-gap">Largest Gap First</option>
+              </select>
+            </div>
+
+            <button id="btn-reanalyze" class="btn secondary-btn w-full">Rielabora XY-Cut</button>
+          </div>
+        </section>
+
+        <!-- Section B: Generated Layout DOM -->
+        <section class="dom-tree-section">
+          <div class="section-title-row">
+            <h3>Generated Layout DOM</h3>
+            <div class="export-dropdown-container">
+              <button id="btn-export" class="icon-btn" title="Export DOM Tree">
+                <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              </button>
+              <div class="export-dropdown glass" id="export-menu">
+                <button data-format="json">Esporta JSON</button>
+                <button data-format="xml">Esporta XML</button>
+                <button data-format="html">Esporta HTML</button>
+              </div>
+            </div>
+          </div>
+          <div class="dom-tree-container" id="dom-tree-container">
+            <div class="empty-state">No layout analyzed yet.</div>
+          </div>
+        </section>
+
+        <!-- Section C: Formatting Inspector -->
+        <section class="inspector-section" id="inspector-section">
+          <div class="row-resizer" id="inspector-resizer"></div>
+          <h3>Formatting Inspector</h3>
+          <div id="inspector-panel" class="inspector-panel">
+            <div class="empty-state">Seleziona un blocco XY-Cut per ispezionarlo.</div>
+          </div>
+        </section>
+
+      </aside>
+    </div>
+  </body>
+</html>

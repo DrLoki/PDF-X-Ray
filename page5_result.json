@@ -1,0 +1,180 @@
+{
+  "root": {
+    "id": "block-root",
+    "type": "root",
+    "bounds": {
+      "x": 0.0,
+      "y": 0.0,
+      "w": 612.0,
+      "h": 792.0
+    },
+    "depth": 0,
+    "children": [
+      {
+        "id": "block-3",
+        "type": "leaf",
+        "bounds": {
+          "x": 0.0,
+          "y": 43.0,
+          "w": 612.0,
+          "h": 418.1535
+        },
+        "depth": 1,
+        "text": "Introduction\nhe Cosmere Roleplaying Game is a  The core Stormlight books for the Cosmere RPG \nT tabletop roleplaying game (RPG) in which \n include the following:\nyou and a group of friends collaboratively tell \n Stormlight Handbook.  You’re reading this book now! \na story of heroes in a universe of adventure and  It contains the foundational rules for playing the game, \npowerful Investiture. This handbook provides rules  such as how to create characters, roll dice, and play \nfor playing in the world of Roshar—the setting for  out scenes. You’ll use this handbook alongside either \nthe Stormlight Archive novels. In this game, you and  a published adventure or the  Stormlight World Guide , \nyour fellow players take on the roles of characters from  which provides lore and adversary profiles you can \naround the world, working together to determine how  use to create your own adventures.\nyour stories unfold as you face a cataclysmic era of  Stormlight World Guide.  This guide explores the \nglobal conflict. history and cultures of Roshar and its place in the \ncosmere. This book contains new canonical lore in \nThe Cosmere RPG\nthe form of character biographies, timelines, and \nThe planet Roshar is a small part of a much larger  travelogues. It also provides adversary profiles for \nuniverse known as the cosmere. Dozens of inhabited  a wide range of non-player characters (NPCs).\nworlds fill the cosmere—worlds of mist, of color, and  Stonewalkers.  The first official Stormlight adventure, \nof powerful divine magic, worlds where adventures  written in close partnership with Brandon Sanderson \nabound. The Cosmere RPG uses a rules system  and Dan Wells, takes players from 1st through 8th level \ndesigned for not only adventures on Roshar, but  on an adventure across the continent of Roshar.\non any of these worlds.\nAdventures Beyond Roshar\nAdventures on Roshar\nWhether you’re ready to adventure throughout the \nThe first books of the Cosmere RPG focus on the  cosmere, or whether you simply want to introduce a \nacclaimed Stormlight setting. The battle for the cosmere  character from another world, the  Stormlight Handbook\nbegins here, as the Knights Radiant and Odium’s forces  is just the beginning! You can expand your adventures \nwield powerful Investiture in a conflict spanning all  with other books in the Cosmere RPG series, including \nof Roshar. the upcoming  Mistborn Handbook ,  Mistborn World \nGuide , and  Mistborn Legacy  adventure.",
+        "formatting": {
+          "fontFamily": "PlantinMTPro-Regular",
+          "fontSize": 10.0,
+          "avgFontSize": 10.8,
+          "fontWeight": "normal",
+          "fontStyle": "normal",
+          "color": "#ffffff",
+          "alignment": "left"
+        }
+      },
+      {
+        "id": "block-4",
+        "type": "leaf",
+        "bounds": {
+          "x": 0.0,
+          "y": 524.53796,
+          "w": 612.0,
+          "h": 115.91205
+        },
+        "depth": 1,
+        "text": "The Knights Radiant must stand again.\nThe ancient oaths have at last been spoken; the spren return. \nMen seek what was lost; I fear the quest will destroy them.\nIt is the nature of magic. A broken soul\n\nhas cracks into which something else can be fit.\n\nSurgebindings, the powers of creation themselves;\n\nthey can brace a broken soul, but they can also widen its fissures.",
+        "formatting": {
+          "fontFamily": "PlantinMTPro-Italic",
+          "fontSize": 12.0,
+          "avgFontSize": 12.0,
+          "fontWeight": "normal",
+          "fontStyle": "italic",
+          "color": "#ffffff",
+          "alignment": "center"
+        }
+      },
+      {
+        "id": "block-2",
+        "type": "leaf",
+        "bounds": {
+          "x": 0.0,
+          "y": 676.51746,
+          "w": 612.0,
+          "h": 115.482544
+        },
+        "depth": 1,
+        "text": "MICAH EPSTEIN",
+        "formatting": {
+          "fontFamily": "LaskiSans-Regular",
+          "fontSize": 8.0,
+          "avgFontSize": 8.0,
+          "fontWeight": "normal",
+          "fontStyle": "normal",
+          "color": "#ffffff",
+          "alignment": "left"
+        }
+      }
+    ]
+  },
+  "projections": {
+    "xGaps": [
+      {
+        "start": 0.0,
+        "end": 37.592,
+        "size": 37.592
+      },
+      {
+        "start": 46.744,
+        "end": 55.9698,
+        "size": 9.2258
+      },
+      {
+        "start": 557.64685,
+        "end": 570.3951,
+        "size": 12.74823
+      },
+      {
+        "start": 575.6051,
+        "end": 612.0,
+        "size": 36.394897
+      }
+    ],
+    "yGaps": [
+      {
+        "start": 0.0,
+        "end": 43.0,
+        "size": 43.0
+      },
+      {
+        "start": 71.75,
+        "end": 75.32683,
+        "size": 3.576828
+      },
+      {
+        "start": 240.13672,
+        "end": 242.1032,
+        "size": 1.9664764
+      },
+      {
+        "start": 448.1575,
+        "end": 450.0385,
+        "size": 1.881012
+      },
+      {
+        "start": 461.1535,
+        "end": 524.53796,
+        "size": 63.38446
+      },
+      {
+        "start": 538.47,
+        "end": 543.43,
+        "size": 4.960022
+      },
+      {
+        "start": 557.47,
+        "end": 559.426,
+        "size": 1.9560547
+      },
+      {
+        "start": 573.466,
+        "end": 578.42206,
+        "size": 4.9560547
+      },
+      {
+        "start": 592.46204,
+        "end": 594.418,
+        "size": 1.9559937
+      },
+      {
+        "start": 608.458,
+        "end": 610.414,
+        "size": 1.9559937
+      },
+      {
+        "start": 624.454,
+        "end": 626.41003,
+        "size": 1.9560547
+      },
+      {
+        "start": 640.45,
+        "end": 676.51746,
+        "size": 36.067444
+      },
+      {
+        "start": 731.7255,
+        "end": 751.16,
+        "size": 19.434448
+      },
+      {
+        "start": 763.0,
+        "end": 792.0,
+        "size": 29.0
+      }
+    ],
+    "pageBounds": {
+      "x": 0.0,
+      "y": 0.0,
+      "w": 612.0,
+      "h": 792.0
+    }
+  }
+}
