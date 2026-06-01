@@ -1,4 +1,4 @@
-# 🩻 PDF X_Ray - Structure & Layout Analyzer
+# 🩻 PDF X-Ray - Structure & Layout Analyzer
 
 ![Tauri](https://img.shields.io/badge/Tauri-2.0-FFC131?logo=tauri&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-6.0-646CFF?logo=vite&logoColor=white)
