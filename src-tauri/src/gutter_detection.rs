@@ -447,6 +447,131 @@ fn finalize_leaf_node(
     }
 }
 
+// Per-row column gap detection: finds a vertical split line that consistently
+// separates elements across multiple visual rows. Used as a fallback when the
+// global X projection gives no gap (columns overlap on the merged projection).
+fn find_per_row_column_gaps(
+    elements: &[TextElement],
+    min_x: f32,
+    max_x: f32,
+    block_w: f32,
+    min_gap_size: f32,
+) -> Vec<Gap> {
+    if elements.len() < 4 {
+        return Vec::new();
+    }
+
+    // 1. Cluster elements into visual rows (Y-baseline tolerance 6pt)
+    let mut sorted = elements.to_vec();
+    sorted.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut rows: Vec<Vec<&TextElement>> = Vec::new();
+    for el in &sorted {
+        let mut placed = false;
+        for row in &mut rows {
+            let avg_y: f32 = row.iter().map(|e| e.y).sum::<f32>() / row.len() as f32;
+            if (el.y - avg_y).abs() < 6.0 {
+                row.push(el);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            rows.push(vec![el]);
+        }
+    }
+
+    // 2. For each row with 2+ elements, record the gap between adjacent elements
+    // as a candidate split point (midpoint of the gap).
+    let mut gap_votes: Vec<f32> = Vec::new();
+    for row in &rows {
+        if row.len() < 2 {
+            continue;
+        }
+        let mut sorted_row = row.to_vec();
+        sorted_row.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        for i in 0..sorted_row.len() - 1 {
+            let right_edge = sorted_row[i].x + sorted_row[i].width;
+            let next_left = sorted_row[i + 1].x;
+            let gap_size = next_left - right_edge;
+            if gap_size >= min_gap_size {
+                let mid = (right_edge + next_left) / 2.0;
+                let rel = (mid - min_x) / block_w;
+                // Only consider gaps in the central 10%–90% of the block
+                if rel >= 0.10 && rel <= 0.90 {
+                    gap_votes.push(mid);
+                }
+            }
+        }
+    }
+
+    if gap_votes.is_empty() {
+        return Vec::new();
+    }
+
+    // 3. Cluster the vote positions into groups (tolerance 20pt) and keep the
+    // group that has the most votes (= the most consistent column split line).
+    gap_votes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut clusters: Vec<(f32, usize)> = Vec::new(); // (centroid, count)
+    for &pos in &gap_votes {
+        let mut found = false;
+        for cluster in &mut clusters {
+            if (pos - cluster.0).abs() < 20.0 {
+                cluster.0 = (cluster.0 * cluster.1 as f32 + pos) / (cluster.1 + 1) as f32;
+                cluster.1 += 1;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            clusters.push((pos, 1));
+        }
+    }
+
+    // Require the winning cluster to appear in at least 25% of multi-element rows
+    let multi_rows = rows.iter().filter(|r| r.len() >= 2).count();
+    let threshold_votes = ((multi_rows as f32 * 0.25).ceil() as usize).max(2);
+
+    clusters.sort_by(|a, b| b.1.cmp(&a.1));
+    let best = &clusters[0];
+    if best.1 < threshold_votes {
+        return Vec::new();
+    }
+
+    // 4. Convert the winning centroid into a Gap by finding the actual nearest
+    // gap boundaries: scan the elements to find the rightmost left-column edge
+    // and leftmost right-column edge around the centroid.
+    let split = best.0;
+    let left_edge = elements
+        .iter()
+        .filter(|e| (e.x + e.width) <= split + 5.0 && (e.x + e.width) >= split - 80.0)
+        .map(|e| e.x + e.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let right_edge = elements
+        .iter()
+        .filter(|e| e.x >= split - 5.0 && e.x <= split + 80.0)
+        .map(|e| e.x)
+        .fold(f32::INFINITY, f32::min);
+
+    if left_edge == f32::NEG_INFINITY || right_edge == f32::INFINITY || right_edge <= left_edge {
+        // Fallback: use the centroid ± half the min gap size
+        let half = min_gap_size / 2.0;
+        return vec![Gap {
+            start: (split - half).max(min_x),
+            end: (split + half).min(max_x),
+            size: min_gap_size,
+        }];
+    }
+
+    vec![Gap {
+        start: left_edge,
+        end: right_edge,
+        size: right_edge - left_edge,
+    }]
+}
+
 // Recursive subdivisions
 fn subdivide_node(
     elements: &[TextElement],
@@ -521,18 +646,38 @@ fn subdivide_node(
         .filter(|g| g.size >= dynamic_threshold_y)
         .collect();
 
+    // If the global X projection finds no column gap (overlapping columns on X axis),
+    // fall back to a per-row gap scan. Also fall back when all x_gaps are margin gaps
+    // (rel_pos outside [0.05, 0.95]) — those will be discarded in the cut loop and
+    // would leave no real column split.
+    let all_margin_gaps = x_gaps.iter().all(|g| {
+        let mid = (g.start + g.end) / 2.0;
+        let rel = (mid - min_x) / bounds.w;
+        rel < 0.05 || rel > 0.95
+    });
+    let x_gaps: Vec<Gap> = if x_gaps.is_empty() || all_margin_gaps {
+        let per_row = find_per_row_column_gaps(elements, min_x, max_x, bounds.w, dynamic_threshold_x);
+        if per_row.is_empty() { x_gaps } else { per_row }
+    } else {
+        x_gaps
+    };
+
     // If no valid gaps exceed the dynamic thresholds, this is a leaf node
     if x_gaps.is_empty() && y_gaps.is_empty() {
         return finalize_leaf_node(my_id, elements, bounds, depth);
     }
 
-    // Centered Title Heuristic (Title Centrati Passanti) & Footnotes check:
-    // We prioritize Y-Cut (horizontal first) if Y-gaps exist, to isolate title blocks
-    // and horizontal sections before vertical splitting of columns.
-    let cut_direction = if !y_gaps.is_empty() {
-        'Y'
-    } else {
+    // Determine cut direction based on strategy.
+    // All strategies use X-first (vertical cut / column detection) as the primary
+    // direction, falling back to Y-cut only when no column gaps are found.
+    // A Y-only pass is performed first exclusively to isolate spanning rows
+    // (titles, footnotes) that have already been pre-processed at the top level;
+    // at recursion depth > 0 we always prefer the X-cut so column structure is
+    // detected before row structure inside each body block.
+    let cut_direction = if !x_gaps.is_empty() {
         'X'
+    } else {
+        'Y'
     };
 
     let mut children = Vec::new();
@@ -550,7 +695,14 @@ fn subdivide_node(
             
             // If it's a very narrow margin cut (e.g. within outer 5% of boundaries), ignore it to prevent empty margin splits
             if rel_pos < 0.05 || rel_pos > 0.95 {
-                current_x = gap.end;
+                // Left-margin gaps (rel_pos < 0.05): advance current_x so the next
+                // sub-block starts after the margin, not from x=0.
+                // Right-margin gaps (rel_pos > 0.95): do NOT advance current_x — the
+                // gap is trailing whitespace and the last sub-block must capture the
+                // content that precedes it.
+                if rel_pos < 0.05 {
+                    current_x = gap.end;
+                }
                 continue;
             }
 
@@ -563,9 +715,15 @@ fn subdivide_node(
                     continue;
                 }
 
+                // Assign elements whose horizontal centre lies within [current_x, gap.start).
+                // Using the centre avoids misclassification of elements whose right edge
+                // touches exactly gap.start (a common floating-point boundary case).
                 let sub_items: Vec<TextElement> = elements
                     .iter()
-                    .filter(|item| item.x >= current_x && (item.x + item.width) <= gap.start)
+                    .filter(|item| {
+                        let cx = item.x + item.width * 0.5;
+                        cx >= current_x && cx < gap.start
+                    })
                     .cloned()
                     .collect();
 
@@ -590,9 +748,13 @@ fn subdivide_node(
             let sub_width = max_x - current_x;
 
             if sub_width >= 1.0 && sub_width >= min_width {
+                // Last sub-block: centre must be >= current_x (gap.end of last gap)
                 let sub_items: Vec<TextElement> = elements
                     .iter()
-                    .filter(|item| item.x >= current_x && (item.x + item.width) <= max_x)
+                    .filter(|item| {
+                        let cx = item.x + item.width * 0.5;
+                        cx >= current_x
+                    })
                     .cloned()
                     .collect();
 
@@ -623,9 +785,13 @@ fn subdivide_node(
                     continue;
                 }
 
+                // Assign elements whose vertical centre lies within [current_y, gap.start).
                 let sub_items: Vec<TextElement> = elements
                     .iter()
-                    .filter(|item| item.y >= current_y && (item.y + item.height) <= gap.start)
+                    .filter(|item| {
+                        let cy = item.y + item.height * 0.5;
+                        cy >= current_y && cy < gap.start
+                    })
                     .cloned()
                     .collect();
 
@@ -650,7 +816,10 @@ fn subdivide_node(
             if sub_height >= 1.0 && sub_height >= min_height {
                 let sub_items: Vec<TextElement> = elements
                     .iter()
-                    .filter(|item| item.y >= current_y && (item.y + item.height) <= max_y)
+                    .filter(|item| {
+                        let cy = item.y + item.height * 0.5;
+                        cy >= current_y
+                    })
                     .cloned()
                     .collect();
 

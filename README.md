@@ -94,5 +94,109 @@ The compiled binaries will be outputted under:
 
 ---
 
+## 🔧 Developer Tools
+
+The `tools/` directory and the Rust `src-tauri/src/bin/` directory contain helper utilities for offline development and debugging of the XY-Cut pipeline without launching the full desktop app.
+
+### `tools/extract_page_py.py` — PDF Page Extractor (Python)
+
+Extracts text elements from a single PDF page using **PyMuPDF** and outputs the JSON format expected by `cli_analyze`.
+
+**Requirements:** `pip install pymupdf`
+
+```powershell
+python tools/extract_page_py.py "C:/path/to/document.pdf" <pageNum> > page.json
+```
+
+Output JSON contains `items`, `pageBounds`, and `borderedBoxes` fields ready for piping into `cli_analyze`.
+
+> **Recommended extractor.** Works reliably with Node.js 22+ without any native canvas dependency.
+
+---
+
+### `tools/extract_page.js` — PDF Page Extractor (Node.js)
+
+Alternative extractor that uses the same **pdf.js** engine as the desktop app, producing coordinate-identical output.
+
+```powershell
+node tools/extract_page.js "C:/path/to/document.pdf" <pageNum> > page.json
+```
+
+> **Note:** Requires a Node.js build with native `DOMMatrix` support (canvas package or Node ≤ 18). With Node.js 22+ it may fail with `DOMMatrix is not defined` — use the Python extractor instead.
+
+---
+
+### `src-tauri/src/bin/cli_analyze.rs` — XY-Cut CLI Analyzer (Rust)
+
+A command-line interface to the same Rust XY-Cut engine used by the desktop app. Reads a JSON page description from a file or stdin and writes the full layout tree to stdout. Useful for batch analysis, regression testing, and strategy comparison without opening the GUI.
+
+**Build:**
+```powershell
+cd src-tauri
+cargo build --bin cli_analyze
+# binary: src-tauri/target/debug/cli_analyze.exe
+```
+
+**Usage:**
+```powershell
+# From file
+src-tauri/target/debug/cli_analyze page.json
+
+# From stdin (pipe from extractor)
+python tools/extract_page_py.py "doc.pdf" 6 | src-tauri/target/debug/cli_analyze
+
+# Specify a strategy
+$input = Get-Content page.json -Raw | ConvertFrom-Json
+$input | Add-Member -NotePropertyName strategy -NotePropertyValue "zero-run" -Force
+$input | ConvertTo-Json -Depth 20 -Compress | src-tauri/target/debug/cli_analyze
+```
+
+**Available strategies:** `combined` (default), `delta-x`, `zero-run`, `dominant-font`.
+
+Full pipeline — extract page 6 and analyze with all strategies:
+```powershell
+python tools/extract_page_py.py "C:/path/to/document.pdf" 6 > page6.json
+
+foreach ($s in @("combined", "delta-x", "zero-run", "dominant-font")) {
+    $inp = Get-Content page6.json -Raw | ConvertFrom-Json
+    $inp | Add-Member -NotePropertyName strategy -NotePropertyValue $s -Force
+    $inp | ConvertTo-Json -Depth 20 -Compress |
+        src-tauri/target/debug/cli_analyze > "result_$s.json"
+    Write-Host "[$s] root children: $((Get-Content result_$s.json | ConvertFrom-Json).root.children.Count)"
+}
+```
+
+See [`docs/cli-analyze.md`](docs/cli-analyze.md) for the full input/output schema reference.
+
+---
+
+### `tools/generate_xray_icons.py` — App Icon Generator (Python)
+
+Generates the full set of application icons (`32x32.png`, `128x128.png`, `256x256.png`, `512x512.png`, `icon.png`, `icon.ico`, `icon.icns`) from scratch using procedural drawing. Run this to regenerate all icons after a visual style change.
+
+**Requirements:** `pip install pillow`
+
+```powershell
+# Run from the repository root
+python tools/generate_xray_icons.py
+```
+
+Output files are written directly to `src-tauri/icons/`.
+
+---
+
+### `tools/regenerate_xray_icons.py` — Icon Resizer (Python)
+
+Lightweight utility that derives the `128x128@2x.png` and `32x32.png` variants by downscaling the existing `256x256.png` with Lanczos resampling. Use this instead of `generate_xray_icons.py` when you only want to refresh the derivative sizes without redrawing the base artwork.
+
+**Requirements:** `pip install pillow`
+
+```powershell
+# Run from the repository root
+python tools/regenerate_xray_icons.py
+```
+
+---
+
 ## ⚖️ License
 This project is licensed under a custom license. See the [LICENSE](LICENSE) file for details.

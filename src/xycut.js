@@ -175,7 +175,12 @@ export function performXYCut(items, pageBounds, options = {}) {
         const midGap = (gap.start + gap.end) / 2.0;
         const relPos = (midGap - minX) / bounds.w;
         if (relPos < 0.05 || relPos > 0.95) {
-          currentX = gap.end;
+          // Left-margin gap: advance currentX so the next sub-block starts after
+          // the margin. Right-margin gap: do NOT advance — trailing whitespace
+          // must not swallow the last column's content.
+          if (relPos < 0.05) {
+            currentX = gap.end;
+          }
           continue;
         }
 

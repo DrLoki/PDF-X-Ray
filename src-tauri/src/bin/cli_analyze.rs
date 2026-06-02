@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read};
-use tauri_app_lib::gutter_detection::{TextElement, Bounds, XYCutResult, perform_auto_xycut};
+use pdf_xray_lib::gutter_detection::{TextElement, Bounds, XYCutResult, perform_auto_xycut};
 
 fn main() {
     // Read JSON from stdin or from first argument file

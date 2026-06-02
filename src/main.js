@@ -25,8 +25,6 @@ let state = {
   priority: 'Y',
   // Navigation mapping for outline
   pageRefMap: new Map(), // maps PDF object IDs to page numbers
-  // Flag to prevent listener from reacting to programmatic checkbox changes
-  programmaticCheckboxChange: false
 };
 
 // UI Elements Cache
@@ -37,19 +35,20 @@ window.addEventListener('DOMContentLoaded', () => {
   registerEvents();
   setupDragAndDrop();
   setupResizableSidebars();
-  
-  if (el.chkAutoGutter && el.chkAutoGutter.checked) {
-    const disableSliders = true;
-    el.rangeY.disabled = disableSliders;
-    el.rangeX.disabled = disableSliders;
-    el.rangeMinW.disabled = disableSliders;
-    el.rangeMinH.disabled = disableSliders;
-    el.selectPriority.disabled = disableSliders;
-    if (el.selectAutoStrategy) el.selectAutoStrategy.disabled = false;
-  } else {
-    if (el.selectAutoStrategy) el.selectAutoStrategy.disabled = true;
-  }
+  applyAutoGutterUIState();
 });
+
+// Centralises all enable/disable logic based on the checkbox state.
+// Call this whenever the checkbox state changes or on init.
+function applyAutoGutterUIState() {
+  const autoOn = el.chkAutoGutter && el.chkAutoGutter.checked;
+  el.rangeY.disabled        = autoOn;
+  el.rangeX.disabled        = autoOn;
+  el.rangeMinW.disabled     = autoOn;
+  el.rangeMinH.disabled     = autoOn;
+  el.selectPriority.disabled = autoOn;
+  if (el.selectAutoStrategy) el.selectAutoStrategy.disabled = !autoOn;
+}
 
 function cacheElements() {
   el.btnOpen = document.getElementById('btn-open-file');
@@ -146,19 +145,7 @@ function registerEvents() {
   setupSlider(el.rangeMinH, el.valMinH, 'minHeight');
   
   el.chkAutoGutter.addEventListener('change', () => {
-    // Skip if this change was triggered programmatically
-    if (state.programmaticCheckboxChange) {
-      state.programmaticCheckboxChange = false;
-      return;
-    }
-    
-    const disableSliders = el.chkAutoGutter.checked;
-    el.rangeY.disabled = disableSliders;
-    el.rangeX.disabled = disableSliders;
-    el.rangeMinW.disabled = disableSliders;
-    el.rangeMinH.disabled = disableSliders;
-    el.selectPriority.disabled = disableSliders;
-    el.selectAutoStrategy.disabled = !disableSliders;
+    applyAutoGutterUIState();
     runXYCutAnalysis();
   });
   
@@ -657,6 +644,7 @@ async function runXYCutAnalysis() {
   };
   
   if (el.chkAutoGutter && el.chkAutoGutter.checked && window.__TAURI__) {
+    // --- AUTO-DETECT MODE: call Rust, update sliders, keep checkbox ON ---
     const rustItems = state.textItems.map(item => ({
       text: item.str,
       x: item.x0,
@@ -667,19 +655,8 @@ async function runXYCutAnalysis() {
       font_name: item.fontName || null
     }));
 
-    const rustPageBounds = {
-      x: pageBounds.x,
-      y: pageBounds.y,
-      w: pageBounds.w,
-      h: pageBounds.h
-    };
-
-    const rustBorderedBoxes = state.currentPageRectangles.map(box => ({
-      x: box.x,
-      y: box.y,
-      w: box.w,
-      h: box.h
-    }));
+    const rustPageBounds = { x: pageBounds.x, y: pageBounds.y, w: pageBounds.w, h: pageBounds.h };
+    const rustBorderedBoxes = state.currentPageRectangles.map(box => ({ x: box.x, y: box.y, w: box.w, h: box.h }));
 
     showLoading(true);
     try {
@@ -691,66 +668,40 @@ async function runXYCutAnalysis() {
       });
       state.xycutResult = JSON.parse(jsonString);
 
-      // If Rust returned projection gaps, use them to set the Row/Column Gap UI
-      try {
-        if (state.xycutResult && state.xycutResult.projections) {
-          const { xGaps = [], yGaps = [] } = state.xycutResult.projections;
+      // Update the four sliders with the values Rust detected, but leave
+      // them disabled and the checkbox checked — the user is in auto mode.
+      if (state.xycutResult && state.xycutResult.projections) {
+        const { xGaps = [], yGaps = [] } = state.xycutResult.projections;
 
-          // Filter out spurious tiny gaps (<5 px) and prefer the smallest meaningful gap
-          const significantThreshold = 5; // px
-          const significantXGaps = xGaps.filter(g => g.size >= significantThreshold);
-          const significantYGaps = yGaps.filter(g => g.size >= significantThreshold);
+        const significantThreshold = 5; // px — ignore noise gaps
+        const sigX = xGaps.filter(g => g.size >= significantThreshold);
+        const sigY = yGaps.filter(g => g.size >= significantThreshold);
 
-          const colGap = significantXGaps.length ? Math.min(...significantXGaps.map(g => g.size)) : (xGaps.length ? Math.min(...xGaps.map(g => g.size)) : null);
-          const rowGap = significantYGaps.length ? Math.min(...significantYGaps.map(g => g.size)) : (yGaps.length ? Math.min(...yGaps.map(g => g.size)) : null);
+        const colGap = sigX.length ? Math.min(...sigX.map(g => g.size))
+                     : xGaps.length ? Math.min(...xGaps.map(g => g.size)) : null;
+        const rowGap = sigY.length ? Math.min(...sigY.map(g => g.size))
+                     : yGaps.length ? Math.min(...yGaps.map(g => g.size)) : null;
 
-          if (colGap !== null) {
-            // state.thresholdX is stored unscaled; JS alg multiplies by zoomScale when used
-            state.thresholdX = Math.max(1, Math.round(colGap / state.zoomScale));
-            if (el.rangeX) el.rangeX.value = state.thresholdX;
-            if (el.valX) el.valX.textContent = state.thresholdX + ' px';
-          }
-
-          if (rowGap !== null) {
-            state.thresholdY = Math.max(1, Math.round(rowGap / state.zoomScale));
-            if (el.rangeY) el.rangeY.value = state.thresholdY;
-            if (el.valY) el.valY.textContent = state.thresholdY + ' px';
-          }
-
-          // Auto-detect works best with Vertical First (columns before rows)
-          state.priority = 'X';
-          if (el.selectPriority) {
-            el.selectPriority.value = 'X';
-          }
-
-          // Disable auto-detect checkbox and re-analyze with the auto-detected parameters
-          if (el.chkAutoGutter) {
-            state.programmaticCheckboxChange = true;
-            el.chkAutoGutter.checked = false;
-          }
-          // Re-run analysis with the new parameters to apply them properly
-          const reanalysisOptions = {
-            thresholdX: state.thresholdX * state.zoomScale,
-            thresholdY: state.thresholdY * state.zoomScale,
-            minWidth: state.minWidth * state.zoomScale,
-            minHeight: state.minHeight * state.zoomScale,
-            priority: state.priority,
-            borderedBoxes: state.currentPageRectangles
-          };
-          state.xycutResult = performXYCut(state.textItems, pageBounds, reanalysisOptions);
+        if (colGap !== null) {
+          state.thresholdX = Math.max(1, Math.round(colGap / state.zoomScale));
+          if (el.rangeX) el.rangeX.value = state.thresholdX;
+          if (el.valX)   el.valX.textContent = state.thresholdX + ' px';
         }
-      } catch (e) {
-        console.warn('Error applying auto-detected gaps to UI:', e);
+        if (rowGap !== null) {
+          state.thresholdY = Math.max(1, Math.round(rowGap / state.zoomScale));
+          if (el.rangeY) el.rangeY.value = state.thresholdY;
+          if (el.valY)   el.valY.textContent = state.thresholdY + ' px';
+        }
       }
     } catch (err) {
       console.error('Failed to run Rust XY-Cut auto gutter:', err);
-      // Fallback to JS XY-Cut
+      // Fallback to JS XY-Cut with current slider values
       const options = {
         thresholdX: state.thresholdX * state.zoomScale,
         thresholdY: state.thresholdY * state.zoomScale,
-        minWidth: state.minWidth * state.zoomScale,
-        minHeight: state.minHeight * state.zoomScale,
-        priority: state.priority,
+        minWidth:   state.minWidth   * state.zoomScale,
+        minHeight:  state.minHeight  * state.zoomScale,
+        priority:   state.priority,
         borderedBoxes: state.currentPageRectangles
       };
       state.xycutResult = performXYCut(state.textItems, pageBounds, options);
@@ -758,16 +709,15 @@ async function runXYCutAnalysis() {
       showLoading(false);
     }
   } else {
+    // --- MANUAL MODE: use slider values as-is ---
     const options = {
       thresholdX: state.thresholdX * state.zoomScale,
       thresholdY: state.thresholdY * state.zoomScale,
-      minWidth: state.minWidth * state.zoomScale,
-      minHeight: state.minHeight * state.zoomScale,
-      priority: state.priority,
+      minWidth:   state.minWidth   * state.zoomScale,
+      minHeight:  state.minHeight  * state.zoomScale,
+      priority:   state.priority,
       borderedBoxes: state.currentPageRectangles
     };
-    
-    // Trigger RXY-Cut algorithm
     state.xycutResult = performXYCut(state.textItems, pageBounds, options);
   }
   
