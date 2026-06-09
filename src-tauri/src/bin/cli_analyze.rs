@@ -20,6 +20,7 @@ fn main() {
         pageBounds: Bounds,
         borderedBoxes: Vec<Bounds>,
         strategy: Option<String>,
+        priority: Option<String>,
     }
 
     let parsed: Input = match serde_json::from_str(&json) {
@@ -31,8 +32,9 @@ fn main() {
     };
 
     let strategy = parsed.strategy.unwrap_or_else(|| "combined".to_string());
+    let priority = parsed.priority.unwrap_or_else(|| "Y".to_string());
 
-    let result: XYCutResult = perform_auto_xycut(&parsed.items, parsed.pageBounds, &parsed.borderedBoxes, &strategy);
+    let result: XYCutResult = perform_auto_xycut(&parsed.items, parsed.pageBounds, &parsed.borderedBoxes, &strategy, &priority);
 
     match serde_json::to_string_pretty(&result) {
         Ok(out) => println!("{}", out),

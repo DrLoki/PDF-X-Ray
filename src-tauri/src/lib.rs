@@ -14,8 +14,9 @@ fn analyze_layout_auto_gutter(
     page_bounds: Bounds,
     bordered_boxes: Vec<Bounds>,
     strategy: String,
+    priority: String,
 ) -> Result<String, String> {
-    let result = perform_auto_xycut(&items, page_bounds, &bordered_boxes, &strategy);
+    let result = perform_auto_xycut(&items, page_bounds, &bordered_boxes, &strategy, &priority);
     serde_json::to_string(&result).map_err(|e| e.to_string())
 }
 

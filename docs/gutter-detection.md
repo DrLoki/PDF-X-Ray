@@ -82,19 +82,21 @@ Because thresholds scale automatically with the document's font size, this strat
 ### Strategy 4 — Combined (`combined`, default)
 
 **Thresholds produced:**
-- `T_x` = `max(delta_x_histogram_result, dominant_font × 1.5)`
+- `T_x` = `max(delta_x_histogram_result, dominant_font × fallback_factor)`
 - `T_y` = `dominant_font × 1.0`, floored at `4 px`
+
+where `fallback_factor` is `1.0` if `priority == "X"`, and `1.5` otherwise.
 
 **How it works:**
 
 This is the most conservative strategy. It runs the full **Delta-X histogram analysis** (Strategy 1) to compute a data-driven column gap estimate, then takes the **maximum** of that estimate and the **Dominant Font heuristic** (Strategy 3):
 
 ```
-T_x = max(detect_dynamic_column_gap(elements, dominant_font),
-          dominant_font × 1.5)
+T_x = max(detect_dynamic_column_gap(elements, dominant_font, priority),
+          dominant_font × fallback_factor)
 ```
 
-The max ensures that even if the histogram valley falls in a very low position (common on pages with many small word gaps), the threshold will never drop below the typographically safe minimum of `dominant_font × 1.5`.
+The max ensures that even if the histogram valley falls in a very low position (common on pages with many small word gaps), the threshold will never drop below the typographically safe minimum (`dominant_font × 1.0` when vertical priority is requested, otherwise `dominant_font × 1.5`).
 
 The row gap threshold follows Strategy 3 exactly: `dominant_font × 1.0`, with a floor of 4 px to avoid cuts smaller than a single pixel row.
 
@@ -119,12 +121,15 @@ Vector rectangles detected on the page (callout boxes, tables with borders) are 
 The remaining elements are passed to `subdivide_node`, which at each level:
 
 1. Computes the dominant font size for the current sub-block.
-2. Derives `T_x` and `T_y` according to the selected strategy.
+2. Derives `T_x` and `T_y` according to the selected strategy, scaled down if `priority == "X"` to allow detecting narrower columns (`gutter_min` becomes `dominant_font × 1.0` instead of `1.5`).
 3. Calls `find_projection_gaps` on both axes to enumerate white-space spans.
 4. Filters gaps smaller than the respective threshold.
-5. **Prefers Y-Cut** (horizontal split) over X-Cut when both are available — this isolates spanning titles and section breaks before attempting column detection.
+5. **Selects the cut direction based on the priority setting:**
+   - If `priority == "X"`, it prefers **X-Cut** (vertical split) over Y-Cut when both are available.
+   - If `priority == "Y"`, it prefers **Y-Cut** (horizontal split) over X-Cut when both are available.
+   - If `priority == "max-gap"`, it selects the axis that has the largest individual gap size.
 6. Validates X-Cut positions: gaps whose midpoint falls within the outer 5% of the block width are discarded to avoid spurious margin splits.
-7. Recurses on each child block, up to a hard limit of **24 levels**.
+7. Recurses on each child block, up to a hard limit of **24 levels**, passing the priority setting down the tree.
 
 ### 4. Leaf Node Finalisation
 

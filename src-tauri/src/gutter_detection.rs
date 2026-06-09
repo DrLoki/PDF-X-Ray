@@ -94,9 +94,10 @@ fn calculate_mode(values: &[f32]) -> f32 {
 }
 
 // Strategy 1: Delta-X statistics & valley detection
-pub fn detect_dynamic_column_gap(elements: &[TextElement], dominant_font: f32) -> f32 {
+pub fn detect_dynamic_column_gap(elements: &[TextElement], dominant_font: f32, priority: &str) -> f32 {
+    let fallback_factor = if priority == "X" { 1.0 } else { 1.5 };
     if elements.len() < 2 {
-        return dominant_font * 1.5;
+        return dominant_font * fallback_factor;
     }
 
     // Group elements by baseline (tolerance of 4px)
@@ -182,8 +183,8 @@ pub fn detect_dynamic_column_gap(elements: &[TextElement], dominant_font: f32) -
         return valley_idx as f32;
     }
 
-    // Fallback heuristic: Font Dominante * 1.5
-    dominant_font * 1.5
+    // Fallback heuristic: Font Dominante * fallback_factor
+    dominant_font * fallback_factor
 }
 
 // Strategy 2: Project boxes onto an axis and find gaps
@@ -483,6 +484,9 @@ fn find_per_row_column_gaps(
 
     // 2. For each row with 2+ elements, record the gap between adjacent elements
     // as a candidate split point (midpoint of the gap).
+    // Use the LARGEST inter-element gap in each row as the column-split candidate —
+    // smaller gaps within the same row are typically intra-column spaces (e.g. bold
+    // label followed by its value within the same column).
     let mut gap_votes: Vec<f32> = Vec::new();
     for row in &rows {
         if row.len() < 2 {
@@ -490,18 +494,25 @@ fn find_per_row_column_gaps(
         }
         let mut sorted_row = row.to_vec();
         sorted_row.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Find the largest gap in this row
+        let mut best_gap_size: f32 = 0.0;
+        let mut best_gap_mid: f32 = 0.0;
         for i in 0..sorted_row.len() - 1 {
             let right_edge = sorted_row[i].x + sorted_row[i].width;
             let next_left = sorted_row[i + 1].x;
             let gap_size = next_left - right_edge;
-            if gap_size >= min_gap_size {
+            if gap_size >= min_gap_size && gap_size > best_gap_size {
                 let mid = (right_edge + next_left) / 2.0;
                 let rel = (mid - min_x) / block_w;
-                // Only consider gaps in the central 10%–90% of the block
                 if rel >= 0.10 && rel <= 0.90 {
-                    gap_votes.push(mid);
+                    best_gap_size = gap_size;
+                    best_gap_mid = mid;
                 }
             }
+        }
+        if best_gap_size > 0.0 {
+            gap_votes.push(best_gap_mid);
         }
     }
 
@@ -579,6 +590,7 @@ fn subdivide_node(
     depth: usize,
     id_counter: &mut usize,
     strategy: &str,
+    priority: &str,
 ) -> LayoutNode {
     let font_sizes: Vec<f32> = elements.iter().map(|e| e.font_size).collect();
     let dominant_font = calculate_mode(&font_sizes);
@@ -610,10 +622,10 @@ fn subdivide_node(
     }
 
     // Select thresholds based on selected strategy
-    let gutter_min = dominant_font * 1.5;
+    let gutter_min = if priority == "X" { dominant_font * 1.0 } else { dominant_font * 1.5 };
     let (dynamic_threshold_x, dynamic_threshold_y) = match strategy {
         "delta-x" => (
-            detect_dynamic_column_gap(elements, dominant_font),
+            detect_dynamic_column_gap(elements, dominant_font, priority),
             (dominant_font * 1.0).max(4.0),
         ),
         "zero-run" => (
@@ -621,11 +633,11 @@ fn subdivide_node(
             5.0,
         ),
         "dominant-font" => (
-            dominant_font * 1.5,
+            if priority == "X" { dominant_font * 1.0 } else { dominant_font * 1.5 },
             dominant_font * 1.0,
         ),
         _ => ( // "combined"
-            detect_dynamic_column_gap(elements, dominant_font).max(gutter_min),
+            detect_dynamic_column_gap(elements, dominant_font, priority).max(gutter_min),
             (dominant_font * 1.0).max(4.0),
         ),
     };
@@ -667,17 +679,22 @@ fn subdivide_node(
         return finalize_leaf_node(my_id, elements, bounds, depth);
     }
 
-    // Determine cut direction based on strategy.
-    // All strategies use X-first (vertical cut / column detection) as the primary
-    // direction, falling back to Y-cut only when no column gaps are found.
-    // A Y-only pass is performed first exclusively to isolate spanning rows
-    // (titles, footnotes) that have already been pre-processed at the top level;
-    // at recursion depth > 0 we always prefer the X-cut so column structure is
-    // detected before row structure inside each body block.
-    let cut_direction = if !x_gaps.is_empty() {
-        'X'
+    // Determine cut direction based on priority
+    let cut_direction = if priority == "X" {
+        if !x_gaps.is_empty() { 'X' } else { 'Y' }
+    } else if priority == "Y" {
+        if !y_gaps.is_empty() { 'Y' } else { 'X' }
     } else {
-        'Y'
+        // max-gap
+        let max_x_gap = x_gaps.iter().map(|g| g.size).fold(0.0, f32::max);
+        let max_y_gap = y_gaps.iter().map(|g| g.size).fold(0.0, f32::max);
+        if max_x_gap >= max_y_gap && max_x_gap > 0.0 {
+            'X'
+        } else if max_y_gap > 0.0 {
+            'Y'
+        } else {
+            'X' // fallback
+        }
     };
 
     let mut children = Vec::new();
@@ -739,7 +756,7 @@ fn subdivide_node(
                     w: sub_width,
                     h: bounds.h,
                 };
-                children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy));
+                children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy, priority));
             }
             current_x = gap.end;
         }
@@ -765,7 +782,7 @@ fn subdivide_node(
                         w: sub_width,
                         h: bounds.h,
                     };
-                    children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy));
+                    children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy, priority));
                 }
             }
         }
@@ -806,7 +823,7 @@ fn subdivide_node(
                     w: bounds.w,
                     h: sub_height,
                 };
-                children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy));
+                children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy, priority));
             }
             current_y = gap.end;
         }
@@ -830,7 +847,7 @@ fn subdivide_node(
                         w: bounds.w,
                         h: sub_height,
                     };
-                    children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy));
+                    children.push(subdivide_node(&sub_items, child_bounds, depth + 1, id_counter, strategy, priority));
                 }
             }
         }
@@ -859,6 +876,7 @@ pub fn perform_auto_xycut(
     page_bounds: Bounds,
     bordered_boxes: &[Bounds],
     strategy: &str,
+    priority: &str,
 ) -> XYCutResult {
     let mut id_counter = 0;
     let mut root_children = Vec::new();
@@ -905,6 +923,7 @@ pub fn perform_auto_xycut(
             1,
             &mut id_counter,
             strategy,
+            priority,
         ));
     }
 
@@ -947,7 +966,7 @@ pub fn perform_auto_xycut(
                 children: None,
             };
 
-            let subdivided = subdivide_node(&inside_items, box_block.bounds.clone(), 1, &mut id_counter, strategy);
+            let subdivided = subdivide_node(&inside_items, box_block.bounds.clone(), 1, &mut id_counter, strategy, priority);
             box_block.children = subdivided.children;
             box_block.cutDirection = subdivided.cutDirection;
             root_children.push(box_block);
@@ -970,7 +989,7 @@ pub fn perform_auto_xycut(
             h: main_h,
         };
 
-        let body_tree = subdivide_node(&remaining_items, temp_root_bounds, 0, &mut id_counter, strategy);
+        let body_tree = subdivide_node(&remaining_items, temp_root_bounds, 0, &mut id_counter, strategy, priority);
         if let Some(children) = body_tree.children {
             root_children.extend(children);
         } else if body_tree.node_type == "leaf" {

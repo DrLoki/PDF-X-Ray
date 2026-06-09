@@ -54,7 +54,8 @@ cli_analyze [<input.json>]
   ],
   "pageBounds": { "x": 0, "y": 0, "w": 612.0, "h": 792.0 },
   "borderedBoxes": [],
-  "strategy": "combined"
+  "strategy": "combined",
+  "priority": "Y"
 }
 ```
 
@@ -71,6 +72,7 @@ cli_analyze [<input.json>]
 | `pageBounds` | object | ✓ | Dimensioni dell'intera pagina |
 | `borderedBoxes` | array | ✓ | Rettangoli vettoriali (callout box). Array vuoto se non disponibili |
 | `strategy` | string | — | Strategia di rilevamento (default: `"combined"`) |
+| `priority` | string | — | Priorità di taglio (`"Y"`, `"X"`, o `"max-gap"`, default: `"Y"`) |
 
 ### Valori validi per `strategy`
 
