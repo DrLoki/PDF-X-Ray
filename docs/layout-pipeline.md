@@ -1,0 +1,218 @@
+# Layout & Reading-Flow Pipeline — Technical Reference
+
+The goal of the engine is to turn a PDF into **logical paragraphs**: units of
+text that can be translated as a whole even when the typesetter split them
+across columns, pages, figures or boxes, and that know exactly where each of
+their pieces sits on the page so the translation can be laid back on top.
+
+All the analysis runs in Rust (`src-tauri/src/`), on the whole document at
+once, in **PDF points** (pdf.js viewport at scale 1, origin top-left). Zoom
+only affects drawing.
+
+```
+runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► units ─► stitching ─► logical paragraphs
+(extract.js) (lines.rs) (xycut.rs)  (roles.rs)  (order.rs)     (flow.rs)  (flow.rs)    (pipeline.rs)
+                                                                                          │
+                                         translated text ─► reflow.rs ─► overlay (translate.js)
+```
+
+| Module | Responsibility |
+|---|---|
+| `src/extract.js` | pdf.js extraction: run boxes (rotation-aware), real font names, Tagged-PDF info (MCID, `/Artifact`, structure element + role), CTM-aware vector rectangles and images |
+| `model.rs` | Input (`PageInput`, `TextElement`, `AnalysisOptions`) and output (`DocumentResult`, `PageResult`, `LayoutNode`, `LogicalParagraph`, `Segment`, `Join`) |
+| `text.rs` | Normalisation (ligatures, soft hyphens), gap-based run joining, de-hyphenation, lexical heuristics (terminal punctuation, page numbers, caption prefixes, bullets, repetition keys) |
+| `lines.rs` | Runs → lines, drop caps |
+| `xycut.rs` | Recursive XY-Cut over lines with a conservation invariant; bordered boxes and tables |
+| `roles.rs` | Block roles (page level + running heads across pages) |
+| `order.rs` | Reading order (Breuel topological sort) |
+| `flow.rs` | Paragraph split inside blocks, Tagged-PDF units, stitching |
+| `reflow.rs` | Distribution of a translated paragraph over its segments |
+| `pipeline.rs` | Orchestration, statistics |
+
+---
+
+## 1. Extraction (`src/extract.js`)
+
+* **Boxes.** Each run's four corners are computed from its text matrix and the
+  font ascent/descent, then mapped through the viewport: rotated and vertical
+  text get a correct axis-aligned box. Font size is `|(c, d)|` of the text
+  matrix (not `transform[3]`, which is wrong for rotated text).
+* **Fonts.** The real PDF font name (`ABCDEF+Garamond-Bold`) is read from
+  `page.commonObjs`; bold/italic flags are appended when the name hides them.
+* **Tagged PDF.** `getTextContent({includeMarkedContent: true})` returns
+  begin/end marked-content markers; a stack gives each run its innermost MCID
+  and whether it is inside `/Artifact`. `page.getStructTree()` is walked to map
+  every MCID to its *block-level* structure element (`P`, `H1…H6`, `Caption`,
+  `Note`, `LI`, `TD`…). Inside list items, table cells, captions and notes the
+  outermost element owns the content, so a list item is one unit.
+* **Graphics.** The operator list is replayed with a CTM stack (`save`,
+  `restore`, `transform`, form XObjects). pdf.js ≥ 5 encodes paths as
+  `constructPath [paintOp, [Float32Array], minMax]` with `DrawOPS`; closed
+  axis-aligned quadrilaterals that are stroked or filled become rectangles,
+  `paintImageXObject` & co. become image boxes (the unit square under the CTM).
+
+## 2. Lines (`lines.rs`)
+
+Runs are swept **left → right**. A run joins the line whose right end is
+horizontally adjacent (gap ≤ 1 em) and whose core overlaps it vertically by at
+least half the smaller height; otherwise it starts a new line. Consequences:
+
+* column gutters and table gaps always split lines;
+* a tall run in one column can never bridge two lines of another column;
+* superscripts stay on their line.
+
+Text inside a line is joined by **geometric gap**: a space is inserted only
+when the gap exceeds 0.15 em, so words split into several runs (kerning, font
+changes) are rebuilt (`tra` + `duzione` → `traduzione`).
+
+**Drop caps**: a 1–2 letter run ≥ 2.5× the body size with smaller text to its
+right is merged into the first line it introduces (`T` + `he Cosmere` →
+`The Cosmere`); its box is remembered so the indented lines beside it are not
+taken for new paragraphs.
+
+## 3. XY-Cut (`xycut.rs`)
+
+Classic recursive XY-Cut, but over *lines*, with three changes:
+
+1. **Conservation invariant.** A cut is a set of split coordinates (gap
+   mid-points); every line is assigned by its centre, so nothing can fall
+   into a gap. Groups thinner than `min_width` / `min_height` are merged with
+   the nearest neighbour instead of being skipped. The old engine silently
+   dropped text there (e.g. the centred title and the footer of `page5`).
+2. **Per-row column fallback.** When a centred title spans the gutter the
+   global X projection has no gap. Rows vote for a consistent split line; the
+   lines crossing it are isolated with horizontal cuts first.
+3. **Obstacles.** Images and boxes take part in the projections, so a cut
+   cannot run "through" a figure.
+
+Thresholds (`AnalysisOptions.strategy`, overridden by `manual`):
+
+| Strategy | `T_x` | `T_y` |
+|---|---|---|
+| `combined` (default) | max(delta-x valley, 1 em) | max(1 em, 4 pt) |
+| `delta-x` | valley between word-spacing and gutter peaks of the run-gap histogram | max(1 em, 4 pt) |
+| `zero-run` | 10 pt | 5 pt |
+| `dominant-font` | 1 em | 1 em |
+
+`priority` (`Y` rows first, `X` columns first, `max-gap`) decides which
+direction is tried first.
+
+**Boxes.** Rectangles are cleaned (page frames, rules, duplicates removed);
+groups of ≥ 3 touching rectangles become one **table**. Each line goes to the
+smallest box containing its centre; a box gets its own sub-tree. A shading
+behind a single row (highlighted heading) is not a box.
+
+## 4. Roles (`roles.rs`)
+
+Per block, in this order:
+
+1. **Tagged PDF**: ≥ 80 % `/Artifact` → `header` / `footer` / `page-number`;
+   structure roles map to `heading`, `caption`, `footnote`, `table`, `figure-text`.
+2. **Boxes**: `table`, `sidebar` (or `caption` if it starts with "Figure…").
+3. **Vertical text** (credits, margin labels) → `figure-text`.
+4. **Margins**: page-number patterns (`12`, `xii`, `Page 3`, `3 / 120`,
+   `Pag. 7 di 30`) in the outer 12 % → `page-number`; ≤ 2 rows in the outer
+   7 % → `header` / `footer`.
+5. **Captions**: caption prefix (`Fig.`, `Figure`, `Tabella`, `Abb.`, `Source:`…)
+   and/or adjacency to an image, with smaller or italic type.
+6. **Footnotes**: lower part of the page, type ≤ 90 % of the body size,
+   starting with a marker (digit, `*`, `†`, superscript).
+7. Otherwise `body` (later split into `heading` / `body` per paragraph).
+
+**Running heads across pages**: blocks in the outer 12 % bands with ≤ 2 rows
+whose *repetition key* (lower-case, digits → `#`, roman folios folded) recurs
+at the same height within ±4 pages become `header` / `footer` / `page-number`.
+
+## 5. Reading order (`order.rs`)
+
+XY-Cut order depends on which cut is tried first: with rows-first a
+horizontal gap between a figure and its caption can make the right column be
+read before the left one. The order is therefore recomputed as a
+**topological sort of Breuel's relations**:
+
+1. `a` before `b` if they overlap horizontally and `a` is above `b`;
+2. `a` before `b` if `a` is entirely left of `b` and no block or figure
+   lying vertically between them overlaps both.
+
+Ties follow the XY-Cut order. Headers come first; footnotes, figure text,
+footers and folios last.
+
+## 6. Units (`flow.rs`)
+
+**Untagged pages.** Each block is split into paragraphs between rows `p`, `c` when:
+
+| Signal | Rule |
+|---|---|
+| size change | font size differs by > 15 % |
+| bullet | `c` starts with `•`, `–`, `1.`, `a)`… |
+| extra leading | line step > 1.4 × median leading |
+| short last line | justified: `p` ends ≥ 2 em before the right edge and ends a sentence or `c` starts upper-case; ragged: `p` ends ≥ 25 % short and ends a sentence |
+| indent / hanging indent | `c` indented (or outdented w.r.t. `p`) and `p` ends a sentence |
+| weight change | whole-row bold ↔ regular and `p` ends a sentence or is short |
+
+A unit of ≤ 3 rows in a larger size (≥ 1.15× body), or entirely bold and not
+ending with a full stop, is a `heading`. Bold *run-in* heads ("**Chapter 1.**
+This walks you…") stay in their paragraph because a row is bold only when
+≥ 95 % of its characters are.
+
+**Tagged pages** (≥ 70 % of the non-artifact text has an MCID): one unit per
+structure element in structure order; a `P` that continues in another column
+is a single unit with two segments.
+
+**De-hyphenation.** A line-final soft hyphen (U+00AD) is always removed. A
+line-final `-` before a lower-case word is removed (`tradu-` + `zione`) —
+unless the document uses soft hyphens for discretionary breaks, in which case
+`-` is a real compound and is kept (`storm-` + `blasted` → `storm-blasted`).
+
+## 7. Stitching (`flow.rs`)
+
+Units are walked in document order. Body text forms the `main` thread, each
+box its own thread; captions, footnotes, headers… never join a thread but do
+not break it either (they are recorded as an *interruption*). A heading closes
+the main thread. The last unit of a thread is continued by the next unit of
+the same thread when:
+
+* the first is the last unit of its block and the second the first of its block;
+* the first does not end a sentence (or ends with a hyphen);
+* font sizes match within 12 % and the second does not start with a bullet;
+* and either the second starts in lower case, or the first ended with a hyphen,
+  or (upper-case start) the first has ≥ 2 rows, a full last line, the second is
+  not indented and the weights match;
+* structure-tagged units are only stitched across pages (inside a page the
+  structure tree already decided).
+
+Each `Join` records its kind (`column`, `page`, `box`), whether something was
+interrupted, and whether a hyphenated word was rebuilt.
+
+## 8. Translation overlay (`reflow.rs`, `src/translate.js`)
+
+A translated paragraph is split over its segments proportionally to the
+characters each segment held in the original, cutting at word boundaries and
+preferring sentence boundaries within ±12 %. Each piece is drawn in an HTML
+box over its segment, with the original leading, weight, style and alignment,
+shrinking the font (down to 45 %) until it fits; boxes that still overflow
+are outlined in amber.
+
+## Tests
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
+```
+
+* unit tests in each module (joining, de-hyphenation, page numbers, captions,
+  drop caps, reading order, reflow);
+* `src-tauri/tests/pipeline.rs`: conservation on the fixtures for every
+  strategy × priority, drop cap / title / footer on `page5`, run-in heads,
+  hanging indent and hyphen policy on `page6`, a synthetic two-page document
+  (column + page stitching, caption interruption, running heads, folios) and a
+  Tagged-PDF page (structure order, artifacts, captions).
+
+## Known limits
+
+* Lists of "Label: value" lines without punctuation (credits pages) are kept
+  as large units.
+* Hard-hyphen removal without soft hyphens in the document is heuristic
+  (no dictionary): a real compound split at a line end loses its hyphen.
+* Tables are detected only from ruled grids; borderless tables are segmented
+  as text blocks.
+* Text in vector outlines or scanned pages is not visible to the engine (no OCR).

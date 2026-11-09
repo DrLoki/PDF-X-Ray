@@ -1,34 +1,58 @@
 import * as pdfjsLib from './assets/pdfjs/pdf.min.mjs';
-import { performXYCut, serializeLayoutTree } from './xycut.js';
+import { extractPage } from './extract.js';
+import { serializeLayoutTree, serializeUnits, serializeParagraphsText, parseTranslations } from './export.js';
+import { pseudoTranslate, renderTranslationLayer } from './translate.js';
 
-// Setup PDFjs Worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdfjs/pdf.worker.min.mjs';
 
-// Application State
-let state = {
+// Colours per block role (overlay, DOM tree, paragraph list).
+const ROLE_COLORS = {
+  body: '#34d399',
+  heading: '#38bdf8',
+  header: '#94a3b8',
+  footer: '#94a3b8',
+  'page-number': '#64748b',
+  caption: '#fbbf24',
+  footnote: '#c084fc',
+  sidebar: '#f472b6',
+  table: '#facc15',
+  'figure-text': '#fb923c',
+};
+const roleColor = (r) => ROLE_COLORS[r] || '#34d399';
+
+const state = {
   pdfDoc: null,
+  fileName: null,
   pageNum: 1,
   totalPageCount: 1,
   zoomScale: 1.0,
   pageRendering: false,
   pageNumPending: null,
-  textItems: [],      // Screen-space text elements with bounds
-  currentPageRectangles: [], // Extracted vector rectangles for bordered boxes
-  xycutResult: null,   // Current XY-cut output
+  loadToken: 0,
+
+  pageData: new Map(),       // pageNum → PageInput sent to Rust (PDF points)
+  extractionDone: false,
+  doc: null,                 // DocumentResult
+  pageResults: new Map(),    // pageNum → PageResult
+  paraById: new Map(),
+
   selectedBlockId: null,
+  selectedParaId: null,
   hoveredBlockId: null,
-  // Sliders config
+
+  translations: new Map(),   // paragraph id → translated text
+  pieces: new Map(),         // paragraph id → [text per segment]
+
   thresholdY: 10,
   thresholdX: 15,
   minWidth: 20,
-  minHeight: 10,
+  minHeight: 0,
   priority: 'Y',
-  // Navigation mapping for outline
-  pageRefMap: new Map(), // maps PDF object IDs to page numbers
+  pageRefMap: new Map(),
 };
 
-// UI Elements Cache
-let el = {};
+const el = {};
+const isTauri = () => !!(window.__TAURI__ && window.__TAURI__.core);
 
 window.addEventListener('DOMContentLoaded', () => {
   cacheElements();
@@ -36,221 +60,150 @@ window.addEventListener('DOMContentLoaded', () => {
   setupDragAndDrop();
   setupResizableSidebars();
   applyAutoGutterUIState();
+  if (!isTauri()) {
+    setStatus('Motore di analisi disponibile solo nell\'app desktop (npm run tauri dev).', 'warn');
+  }
 });
 
-// Centralises all enable/disable logic based on the checkbox state.
-// Call this whenever the checkbox state changes or on init.
 function applyAutoGutterUIState() {
-  const autoOn = el.chkAutoGutter && el.chkAutoGutter.checked;
+  const autoOn = el.chkAutoGutter.checked;
   el.rangeY.disabled = autoOn;
   el.rangeX.disabled = autoOn;
   el.rangeMinW.disabled = autoOn;
   el.rangeMinH.disabled = autoOn;
-  el.selectPriority.disabled = autoOn;
-  if (el.selectAutoStrategy) el.selectAutoStrategy.disabled = !autoOn;
+  el.selectAutoStrategy.disabled = !autoOn;
 }
 
 function cacheElements() {
-  el.btnOpen = document.getElementById('btn-open-file');
-  el.fileSelector = document.getElementById('file-selector');
-  el.btnPrev = document.getElementById('btn-prev-page');
-  el.btnNext = document.getElementById('btn-next-page');
-  el.inputPageNum = document.getElementById('input-page-num');
-  el.txtPageTotal = document.getElementById('txt-page-total');
-  el.btnZoomIn = document.getElementById('btn-zoom-in');
-  el.btnZoomOut = document.getElementById('btn-zoom-out');
-  el.txtZoomPercent = document.getElementById('txt-zoom-percent');
-  el.chkShowChars = document.getElementById('chk-show-chars');
-  el.chkShowBlocks = document.getElementById('chk-show-blocks');
-  el.chkShowProjections = document.getElementById('chk-show-projections');
-  el.chkAutoGutter = document.getElementById('chk-auto-gutter');
-  el.selectAutoStrategy = document.getElementById('select-auto-strategy');
-  el.pdfCanvas = document.getElementById('pdf-canvas');
-  el.overlayCanvas = document.getElementById('overlay-canvas');
-  el.canvasContainer = document.getElementById('canvas-container');
-  el.viewport = document.getElementById('canvas-viewport');
-  el.spinner = document.getElementById('loading-spinner');
-
-  // Tabs
-  el.tabBookmarks = document.getElementById('tab-bookmarks');
-  el.tabTagged = document.getElementById('tab-tagged');
-  el.panelBookmarks = document.getElementById('panel-bookmarks');
-  el.panelTagged = document.getElementById('panel-tagged');
-
-  // Left Sidebar Trees
-  el.outlineTree = document.getElementById('outline-tree');
-  el.taggedTree = document.getElementById('tagged-tree');
-  el.taggedBadge = document.getElementById('tagged-status-badge');
-
-  // Right Sidebar Controls
-  el.rangeY = document.getElementById('range-threshold-y');
-  el.valY = document.getElementById('val-threshold-y');
-  el.rangeX = document.getElementById('range-threshold-x');
-  el.valX = document.getElementById('val-threshold-x');
-  el.rangeMinW = document.getElementById('range-min-w');
-  el.valMinW = document.getElementById('val-min-w');
-  el.rangeMinH = document.getElementById('range-min-h');
-  el.valMinH = document.getElementById('val-min-h');
-  el.selectPriority = document.getElementById('select-priority');
-  el.btnReanalyze = document.getElementById('btn-reanalyze');
-
-  // Right Sidebar DOM & Inspector
-  el.domTreeContainer = document.getElementById('dom-tree-container');
-  el.inspectorPanel = document.getElementById('inspector-panel');
-  el.btnExport = document.getElementById('btn-export');
-  el.exportMenu = document.getElementById('export-menu');
+  const ids = {
+    btnOpen: 'btn-open-file', fileSelector: 'file-selector', btnPrev: 'btn-prev-page', btnNext: 'btn-next-page',
+    inputPageNum: 'input-page-num', txtPageTotal: 'txt-page-total', btnZoomIn: 'btn-zoom-in', btnZoomOut: 'btn-zoom-out',
+    txtZoomPercent: 'txt-zoom-percent', chkShowChars: 'chk-show-chars', chkShowBlocks: 'chk-show-blocks',
+    chkShowProjections: 'chk-show-projections', chkShowFlow: 'chk-show-flow', chkShowTranslation: 'chk-show-translation',
+    btnPseudo: 'btn-pseudo', btnImportTr: 'btn-import-tr', trFileSelector: 'tr-file-selector', analysisStatus: 'analysis-status',
+    chkAutoGutter: 'chk-auto-gutter', selectAutoStrategy: 'select-auto-strategy', chkUseTags: 'chk-use-tags', chkStitch: 'chk-stitch',
+    pdfCanvas: 'pdf-canvas', overlayCanvas: 'overlay-canvas', translationLayer: 'translation-layer',
+    canvasContainer: 'canvas-container', spinner: 'loading-spinner',
+    tabBookmarks: 'tab-bookmarks', tabTagged: 'tab-tagged', tabParagraphs: 'tab-paragraphs',
+    panelBookmarks: 'panel-bookmarks', panelTagged: 'panel-tagged', panelParagraphs: 'panel-paragraphs',
+    outlineTree: 'outline-tree', taggedTree: 'tagged-tree', taggedBadge: 'tagged-status-badge',
+    paragraphList: 'paragraph-list', analysisStats: 'analysis-stats', chkAllParagraphs: 'chk-all-paragraphs',
+    rangeY: 'range-threshold-y', valY: 'val-threshold-y', rangeX: 'range-threshold-x', valX: 'val-threshold-x',
+    rangeMinW: 'range-min-w', valMinW: 'val-min-w', rangeMinH: 'range-min-h', valMinH: 'val-min-h',
+    selectPriority: 'select-priority', btnReanalyze: 'btn-reanalyze',
+    domTreeContainer: 'dom-tree-container', inspectorPanel: 'inspector-panel', btnExport: 'btn-export', exportMenu: 'export-menu',
+  };
+  for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
 
 function registerEvents() {
-  // File Loading
   el.btnOpen.addEventListener('click', () => el.fileSelector.click());
-  el.fileSelector.addEventListener('change', handleFileSelect);
+  el.fileSelector.addEventListener('change', (e) => e.target.files?.[0] && loadPDFFile(e.target.files[0]));
 
-  // Navigation
-  el.btnPrev.addEventListener('click', onPrevPage);
-  el.btnNext.addEventListener('click', onNextPage);
-  el.inputPageNum.addEventListener('change', onPageNumInput);
+  el.btnPrev.addEventListener('click', () => gotoPage(state.pageNum - 1));
+  el.btnNext.addEventListener('click', () => gotoPage(state.pageNum + 1));
+  el.inputPageNum.addEventListener('change', () => gotoPage(parseInt(el.inputPageNum.value, 10) || 1));
 
-  // Zoom
-  el.btnZoomIn.addEventListener('click', onZoomIn);
-  el.btnZoomOut.addEventListener('click', onZoomOut);
+  el.btnZoomIn.addEventListener('click', () => setZoom(state.zoomScale + 0.2));
+  el.btnZoomOut.addEventListener('click', () => setZoom(state.zoomScale - 0.2));
 
-  // Visualization toggles
-  el.chkShowChars.addEventListener('change', drawOverlay);
-  el.chkShowBlocks.addEventListener('change', drawOverlay);
-  el.chkShowProjections.addEventListener('change', drawOverlay);
+  [el.chkShowChars, el.chkShowBlocks, el.chkShowProjections, el.chkShowFlow].forEach(c => c.addEventListener('change', drawOverlay));
+  el.chkShowTranslation.addEventListener('change', refreshTranslationLayer);
+  el.chkAllParagraphs.addEventListener('change', renderParagraphList);
 
-  // Sidebar Tabs
-  const tabButtons = [el.tabBookmarks, el.tabTagged];
-  tabButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      tabButtons.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+  const tabs = [el.tabBookmarks, el.tabTagged, el.tabParagraphs];
+  const panels = [el.panelBookmarks, el.panelTagged, el.panelParagraphs];
+  tabs.forEach(btn => btn.addEventListener('click', () => {
+    tabs.forEach(b => b.classList.toggle('active', b === btn));
+    panels.forEach(p => p.classList.toggle('active', p.id === btn.dataset.target));
+  }));
 
-      const targetPanel = btn.dataset.target;
-      [el.panelBookmarks, el.panelTagged].forEach(panel => {
-        if (panel.id === targetPanel) {
-          panel.classList.add('active');
-        } else {
-          panel.classList.remove('active');
-        }
-      });
-    });
-  });
-
-  // Sliders interaction
   setupSlider(el.rangeY, el.valY, 'thresholdY');
   setupSlider(el.rangeX, el.valX, 'thresholdX');
   setupSlider(el.rangeMinW, el.valMinW, 'minWidth');
   setupSlider(el.rangeMinH, el.valMinH, 'minHeight');
 
-  el.chkAutoGutter.addEventListener('change', () => {
-    applyAutoGutterUIState();
-    runXYCutAnalysis();
-  });
+  el.chkAutoGutter.addEventListener('change', () => { applyAutoGutterUIState(); runAnalysis(); });
+  el.selectAutoStrategy.addEventListener('change', runAnalysis);
+  el.selectPriority.addEventListener('change', (e) => { state.priority = e.target.value; runAnalysis(); });
+  el.chkUseTags.addEventListener('change', runAnalysis);
+  el.chkStitch.addEventListener('change', runAnalysis);
+  el.btnReanalyze.addEventListener('click', runAnalysis);
 
-  el.selectAutoStrategy.addEventListener('change', () => {
-    runXYCutAnalysis();
-  });
+  el.btnPseudo.addEventListener('click', applyPseudoTranslation);
+  el.btnImportTr.addEventListener('click', () => el.trFileSelector.click());
+  el.trFileSelector.addEventListener('change', importTranslations);
 
-  el.selectPriority.addEventListener('change', (e) => {
-    state.priority = e.target.value;
-  });
-
-  el.btnReanalyze.addEventListener('click', runXYCutAnalysis);
-
-  // Canvas Mouse interaction (Bi-directional Hover and Click)
   el.overlayCanvas.addEventListener('mousemove', handleCanvasMouseMove);
   el.overlayCanvas.addEventListener('mouseout', handleCanvasMouseOut);
-  el.overlayCanvas.addEventListener('click', handleCanvasMouseClick);
+  el.overlayCanvas.addEventListener('click', () => state.hoveredBlockId && selectBlock(state.hoveredBlockId));
 
-  // Export Menu Dropdown
-  el.btnExport.addEventListener('click', (e) => {
-    e.stopPropagation();
-    el.exportMenu.classList.toggle('show');
-  });
+  el.btnExport.addEventListener('click', (e) => { e.stopPropagation(); el.exportMenu.classList.toggle('show'); });
   document.addEventListener('click', () => el.exportMenu.classList.remove('show'));
-
-  el.exportMenu.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const format = btn.dataset.format;
-      el.exportMenu.classList.remove('show');
-      exportLayoutDOM(format);
-    });
-  });
+  el.exportMenu.querySelectorAll('button').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    el.exportMenu.classList.remove('show');
+    exportData(btn.dataset.format);
+  }));
 }
 
-// Slider link helpers
-function setupSlider(rangeInput, valDisplay, stateKey) {
-  rangeInput.addEventListener('input', (e) => {
-    const val = parseInt(e.target.value, 10);
-    valDisplay.textContent = val + ' px';
-    state[stateKey] = val;
-  });
+function setupSlider(rangeInput, valDisplay, key) {
+  const sync = () => { valDisplay.textContent = state[key] + ' pt'; };
+  rangeInput.value = state[key];
+  sync();
+  rangeInput.addEventListener('input', (e) => { state[key] = parseInt(e.target.value, 10); sync(); });
+  rangeInput.addEventListener('change', runAnalysis);
+}
+
+function setStatus(text, kind = '') {
+  el.analysisStatus.textContent = text;
+  el.analysisStatus.className = 'analysis-status' + (kind ? ' ' + kind : '');
 }
 
 // --------------------------------------------------------------------------
-// File Handling
+// File loading & document extraction
 // --------------------------------------------------------------------------
 
 function setupDragAndDrop() {
   const ws = document.getElementById('document-workspace');
-
-  ws.addEventListener('dragover', (e) => {
+  ws.addEventListener('dragover', (e) => { e.preventDefault(); ws.classList.add('drag-over'); });
+  ws.addEventListener('dragleave', () => ws.classList.remove('drag-over'));
+  ws.addEventListener('drop', (e) => {
     e.preventDefault();
-    ws.style.borderColor = 'var(--accent)';
-    ws.style.backgroundColor = 'rgba(56, 189, 248, 0.03)';
+    ws.classList.remove('drag-over');
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))) loadPDFFile(file);
   });
-
-  const resetDragStyles = () => {
-    ws.style.borderColor = '';
-    ws.style.backgroundColor = '';
-  };
-
-  ws.addEventListener('dragleave', resetDragStyles);
-  ws.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    resetDragStyles();
-
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        loadPDFFile(file);
-      }
-    }
-  });
-}
-
-async function handleFileSelect(e) {
-  if (e.target.files && e.target.files.length > 0) {
-    loadPDFFile(e.target.files[0]);
-  }
 }
 
 async function loadPDFFile(file) {
+  const token = ++state.loadToken;
   showLoading(true);
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-
-    state.pdfDoc = await loadingTask.promise;
+    const data = await file.arrayBuffer();
+    if (state.pdfDoc) state.pdfDoc.destroy();
+    state.pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+    state.fileName = file.name;
     state.totalPageCount = state.pdfDoc.numPages;
     state.pageNum = 1;
+    state.pageData.clear();
+    state.pageResults.clear();
+    state.paraById.clear();
+    state.doc = null;
+    state.extractionDone = false;
+    state.translations.clear();
+    state.pieces.clear();
+    state.selectedBlockId = state.selectedParaId = state.hoveredBlockId = null;
 
     el.txtPageTotal.textContent = state.totalPageCount;
     el.inputPageNum.value = 1;
     el.inputPageNum.max = state.totalPageCount;
 
-    // Resolve Page Refs mapping for bookmarks
     await buildPageRefMap();
-
-    // Extract metadata
     await loadBookmarks();
-    await loadTaggedPDFStructure();
-
-    // Render first page
-    await renderPage(state.pageNum);
+    await renderPage(1);
+    showLoading(false);
+    await extractDocument(token);
   } catch (err) {
     console.error('Error loading PDF file:', err);
     alert('Errore nel caricamento del file PDF: ' + err.message);
@@ -259,16 +212,38 @@ async function loadPDFFile(file) {
   }
 }
 
-// Generates a map of PDF Object references to 1-based page numbers
+/** Extract every page (text runs, tags, graphics), then analyse the whole document. */
+async function extractDocument(token) {
+  const n = state.totalPageCount;
+  // current page first so that its overlay can be drawn immediately
+  const order = [state.pageNum, ...Array.from({ length: n }, (_, i) => i + 1).filter(p => p !== state.pageNum)];
+  let done = 0;
+  for (const p of order) {
+    if (token !== state.loadToken) return;
+    if (!state.pageData.has(p)) {
+      try {
+        const r = await extractPage(pdfjsLib, state.pdfDoc, p);
+        state.pageData.set(p, r.data);
+      } catch (err) {
+        console.warn('Extraction failed on page ' + p, err);
+        state.pageData.set(p, { pageNum: p, pageBounds: { x: 0, y: 0, w: 1, h: 1 }, items: [], borderedBoxes: [], images: [] });
+      }
+    }
+    done++;
+    if (done === 1) drawOverlay();
+    if (done % 5 === 0 || done === n) setStatus(`Estrazione ${done}/${n}…`);
+  }
+  if (token !== state.loadToken) return;
+  state.extractionDone = true;
+  await runAnalysis();
+}
+
 async function buildPageRefMap() {
   state.pageRefMap.clear();
   for (let i = 1; i <= state.totalPageCount; i++) {
     try {
       const page = await state.pdfDoc.getPage(i);
-      const pageRef = page.ref;
-      if (pageRef) {
-        state.pageRefMap.set(pageRef.num + '_' + pageRef.gen, i);
-      }
+      if (page.ref) state.pageRefMap.set(page.ref.num + '_' + page.ref.gen, i);
     } catch (e) {
       console.warn('Could not retrieve ref for page ' + i, e);
     }
@@ -280,138 +255,136 @@ function showLoading(show) {
 }
 
 // --------------------------------------------------------------------------
-// Navigation & Zoom
+// Analysis (Rust engine)
 // --------------------------------------------------------------------------
 
-function queueRenderPage(num) {
-  if (state.pageRendering) {
-    state.pageNumPending = num;
-  } else {
-    renderPage(num);
+function analysisOptions() {
+  const opts = {
+    strategy: el.selectAutoStrategy.value,
+    priority: state.priority,
+    useTags: el.chkUseTags.checked,
+    stitch: el.chkStitch.checked,
+  };
+  if (!el.chkAutoGutter.checked) {
+    opts.manual = {
+      thresholdX: state.thresholdX,
+      thresholdY: state.thresholdY,
+      minWidth: state.minWidth,
+      minHeight: state.minHeight,
+    };
   }
+  return opts;
+}
+
+async function runAnalysis() {
+  if (!state.pdfDoc) return;
+  if (!isTauri()) {
+    setStatus('Motore di analisi disponibile solo nell\'app desktop.', 'warn');
+    return;
+  }
+  if (!state.extractionDone) return; // analysis starts automatically when extraction ends
+  const token = state.loadToken;
+  const pages = Array.from({ length: state.totalPageCount }, (_, i) => state.pageData.get(i + 1)).filter(Boolean);
+  setStatus('Analisi in corso…');
+  const t0 = performance.now();
+  try {
+    const doc = await window.__TAURI__.core.invoke('analyze_document', { pages, options: analysisOptions() });
+    if (token !== state.loadToken) return;
+    state.doc = doc;
+    state.pageResults = new Map(doc.pages.map(p => [p.pageNum, p]));
+    state.paraById = new Map(doc.paragraphs.map(p => [p.id, p]));
+    if (!state.paraById.has(state.selectedParaId)) state.selectedParaId = null;
+    state.selectedBlockId = null;
+    const s = doc.stats;
+    const lost = s.inputChars - s.outputChars;
+    setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : ''), lost ? 'warn' : 'ok');
+    await recomputePieces();
+    refreshPageUI();
+  } catch (err) {
+    console.error('Analysis failed:', err);
+    setStatus('Analisi fallita: ' + err, 'warn');
+  }
+}
+
+function currentPageResult() {
+  return state.pageResults.get(state.pageNum) || null;
+}
+
+// --------------------------------------------------------------------------
+// Navigation & rendering
+// --------------------------------------------------------------------------
+
+function gotoPage(num) {
+  if (!state.pdfDoc) return;
+  num = Math.max(1, Math.min(state.totalPageCount, num));
+  state.pageNum = num;
+  el.inputPageNum.value = num;
+  state.selectedBlockId = null;
+  queueRenderPage(num);
+}
+
+function setZoom(z) {
+  z = Math.round(Math.max(0.4, Math.min(3.0, z)) * 10) / 10;
+  state.zoomScale = z;
+  el.txtZoomPercent.textContent = Math.round(z * 100) + '%';
+  if (state.pdfDoc) queueRenderPage(state.pageNum);
+}
+
+function queueRenderPage(num) {
+  if (state.pageRendering) state.pageNumPending = num;
+  else renderPage(num);
 }
 
 async function renderPage(num) {
   state.pageRendering = true;
-  showLoading(true);
-
   try {
     const page = await state.pdfDoc.getPage(num);
-
-    // Calculate Viewport Dimensions based on zoom scale
     const viewport = page.getViewport({ scale: state.zoomScale });
-
-    // Set Canvas Dimensions
-    el.pdfCanvas.width = viewport.width;
-    el.pdfCanvas.height = viewport.height;
-    el.overlayCanvas.width = viewport.width;
-    el.overlayCanvas.height = viewport.height;
-
+    const ratio = window.devicePixelRatio || 1;
+    for (const c of [el.pdfCanvas, el.overlayCanvas]) {
+      c.width = Math.floor(viewport.width * ratio);
+      c.height = Math.floor(viewport.height * ratio);
+      c.style.width = viewport.width + 'px';
+      c.style.height = viewport.height + 'px';
+    }
     el.canvasContainer.style.width = viewport.width + 'px';
     el.canvasContainer.style.height = viewport.height + 'px';
+    el.translationLayer.style.width = viewport.width + 'px';
+    el.translationLayer.style.height = viewport.height + 'px';
 
     const ctx = el.pdfCanvas.getContext('2d');
-
-    // Render PDF page into canvas
-    const renderContext = {
+    await page.render({
       canvasContext: ctx,
-      viewport: viewport
-    };
+      viewport,
+      transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+    }).promise;
 
-    await page.render(renderContext).promise;
-
-    // Extract Text metrics from the rendered page
-    const textContent = await page.getTextContent({ includeMarkedContent: true });
-
-    // Convert PDF point coordinates into screen/canvas pixel coordinates
-    state.textItems = textContent.items
-      .filter(item => item && item.transform && item.str !== undefined)
-      .map(item => {
-        // item.transform matrix = [scaleX, skewY, skewX, scaleY, translateX, translateY]
-        const tx = item.transform[4];
-        const ty = item.transform[5];
-        const width = item.width;
-        const height = item.height || item.transform[3]; // Fallback to font size if height is missing
-
-        // Convert to viewport coordinates: [left, top, right, bottom]
-        const rect = viewport.convertToViewportRectangle([tx, ty, tx + width, ty + height]);
-
-        // Rect returned is [x0, y0, x1, y1] where y1 > y0
-        return {
-          str: item.str,
-          x0: Math.min(rect[0], rect[2]),
-          y0: Math.min(rect[1], rect[3]),
-          x1: Math.max(rect[0], rect[2]),
-          y1: Math.max(rect[1], rect[3]),
-          fontSize: item.transform[3] * state.zoomScale,
-          fontName: item.fontName,
-          direction: item.dir
-        };
-      }).filter(item => item.str.trim().length > 0); // Ignore pure whitespace items
-
-    // Extract vector rectangles for bordered boxes first!
-    state.currentPageRectangles = await extractRectangles(page, viewport);
-
-    // Run Recursive XY-Cut Algorithm on this page!
-    await runXYCutAnalysis();
-
-    // Load structure tags for the current page
+    refreshPageUI();
     loadTaggedPDFStructure();
-
   } catch (err) {
     console.error('Error rendering page:', err);
   } finally {
     state.pageRendering = false;
-    showLoading(false);
-
     if (state.pageNumPending !== null) {
-      const nextNum = state.pageNumPending;
+      const next = state.pageNumPending;
       state.pageNumPending = null;
-      renderPage(nextNum);
+      renderPage(next);
     }
   }
 }
 
-function onPrevPage() {
-  if (state.pageNum <= 1) return;
-  state.pageNum--;
-  el.inputPageNum.value = state.pageNum;
-  queueRenderPage(state.pageNum);
-}
-
-function onNextPage() {
-  if (state.pageNum >= state.totalPageCount) return;
-  state.pageNum++;
-  el.inputPageNum.value = state.pageNum;
-  queueRenderPage(state.pageNum);
-}
-
-function onPageNumInput() {
-  let val = parseInt(el.inputPageNum.value, 10);
-  if (isNaN(val) || val < 1) val = 1;
-  if (val > state.totalPageCount) val = state.totalPageCount;
-
-  state.pageNum = val;
-  el.inputPageNum.value = val;
-  queueRenderPage(state.pageNum);
-}
-
-function onZoomIn() {
-  if (state.zoomScale >= 3.0) return;
-  state.zoomScale += 0.2;
-  el.txtZoomPercent.textContent = Math.round(state.zoomScale * 100) + '%';
-  if (state.pdfDoc) queueRenderPage(state.pageNum);
-}
-
-function onZoomOut() {
-  if (state.zoomScale <= 0.4) return;
-  state.zoomScale -= 0.2;
-  el.txtZoomPercent.textContent = Math.round(state.zoomScale * 100) + '%';
-  if (state.pdfDoc) queueRenderPage(state.pageNum);
+function refreshPageUI() {
+  renderLayoutDOMTree();
+  renderParagraphList();
+  drawOverlay();
+  refreshTranslationLayer();
+  if (state.selectedBlockId) selectBlock(state.selectedBlockId, false);
+  else if (state.selectedParaId) populateParagraphInspector(state.paraById.get(state.selectedParaId));
+  else el.inspectorPanel.innerHTML = '<div class="empty-state">Seleziona un blocco o un paragrafo per ispezionarlo.</div>';
 }
 
 // --------------------------------------------------------------------------
-// Bookmarks/Outline Extraction
+// Bookmarks & Tagged structure (navigation panels)
 // --------------------------------------------------------------------------
 
 async function loadBookmarks() {
@@ -422,15 +395,10 @@ async function loadBookmarks() {
       el.outlineTree.innerHTML = '<div class="empty-state">No outline bookmarks in this PDF.</div>';
       return;
     }
-
-    const rootUl = document.createElement('div');
-    rootUl.className = 'tree-root';
-
-    for (const item of outline) {
-      rootUl.appendChild(await createOutlineNode(item));
-    }
-
-    el.outlineTree.appendChild(rootUl);
+    const root = document.createElement('div');
+    root.className = 'tree-root';
+    for (const item of outline) root.appendChild(await createOutlineNode(item));
+    el.outlineTree.appendChild(root);
   } catch (err) {
     console.error('Error loading outline bookmarks:', err);
     el.outlineTree.innerHTML = '<div class="empty-state font-red">Errore nel caricamento dei segnalibri.</div>';
@@ -440,518 +408,364 @@ async function loadBookmarks() {
 async function createOutlineNode(item) {
   const node = document.createElement('div');
   node.className = 'tree-node';
-  if (item.items && item.items.length > 0) {
-    node.classList.add('has-children');
-  }
+  const hasKids = item.items && item.items.length > 0;
+  if (hasKids) node.classList.add('has-children');
 
   const header = document.createElement('div');
   header.className = 'tree-node-header';
-
   const toggle = document.createElement('span');
   toggle.className = 'tree-toggle';
-  toggle.textContent = item.items && item.items.length > 0 ? '▶' : '';
+  toggle.textContent = hasKids ? '▶' : '';
   header.appendChild(toggle);
-
   const title = document.createElement('span');
   title.className = 'tree-node-title';
   title.textContent = item.title;
   header.appendChild(title);
 
-  // Resolve Destination Page
-  let pageNum = null;
   if (item.dest) {
-    pageNum = await resolveDestPage(item.dest);
+    const pageNum = await resolveDestPage(item.dest);
     if (pageNum) {
-      const pageBadge = document.createElement('span');
-      pageBadge.className = 'tree-node-badge';
-      pageBadge.textContent = 'p. ' + pageNum;
-      header.appendChild(pageBadge);
-
+      const badge = document.createElement('span');
+      badge.className = 'tree-node-badge';
+      badge.textContent = 'p. ' + pageNum;
+      header.appendChild(badge);
       header.addEventListener('click', (e) => {
         e.stopPropagation();
-        state.pageNum = pageNum;
-        el.inputPageNum.value = pageNum;
-        queueRenderPage(pageNum);
-
-        // Highlight outline node
+        gotoPage(pageNum);
         document.querySelectorAll('.tree-node-header').forEach(h => h.classList.remove('active'));
         header.classList.add('active');
       });
     }
   }
-
   node.appendChild(header);
 
-  // Expand/Collapse sub-bookmarks
-  if (item.items && item.items.length > 0) {
-    const childrenContainer = document.createElement('div');
-    childrenContainer.className = 'tree-children';
-
-    for (const subItem of item.items) {
-      childrenContainer.appendChild(await createOutlineNode(subItem));
-    }
-    node.appendChild(childrenContainer);
-
-    toggle.addEventListener('click', (e) => {
-      e.stopPropagation();
-      node.classList.toggle('expanded');
-    });
+  if (hasKids) {
+    const kids = document.createElement('div');
+    kids.className = 'tree-children';
+    for (const sub of item.items) kids.appendChild(await createOutlineNode(sub));
+    node.appendChild(kids);
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); node.classList.toggle('expanded'); });
   }
-
   return node;
 }
 
-// Translates a PDF Destination Reference or string identifier into a page number
 async function resolveDestPage(dest) {
-  if (typeof dest === 'number') {
-    return dest + 1; // PDF.js outline numbers are sometimes index-based
-  }
-
-  let destRef = null;
+  if (typeof dest === 'number') return dest + 1;
+  let ref = null;
   if (typeof dest === 'string') {
-    // Look up named destination
     try {
       const resolved = await state.pdfDoc.getDestination(dest);
-      if (resolved && resolved.length > 0) {
-        destRef = resolved[0];
-      }
+      if (resolved && resolved.length > 0) ref = resolved[0];
     } catch (e) {
       console.warn('Could not resolve named destination: ' + dest, e);
     }
   } else if (Array.isArray(dest)) {
-    destRef = dest[0];
+    ref = dest[0];
   }
-
-  if (destRef && typeof destRef === 'object') {
-    const key = destRef.num + '_' + destRef.gen;
-    if (state.pageRefMap.has(key)) {
-      return state.pageRefMap.get(key);
-    }
-  }
+  if (ref && typeof ref === 'object') return state.pageRefMap.get(ref.num + '_' + ref.gen) || null;
+  if (typeof ref === 'number') return ref + 1;
   return null;
 }
-
-// --------------------------------------------------------------------------
-// Tagged PDF (StructTree) Extraction
-// --------------------------------------------------------------------------
 
 async function loadTaggedPDFStructure() {
   el.taggedTree.innerHTML = '';
   el.taggedBadge.className = 'status-badge checking';
   el.taggedBadge.textContent = 'Analyzing structure...';
-
   try {
     if (!state.pdfDoc) return;
     const page = await state.pdfDoc.getPage(state.pageNum);
-    const structTree = await page.getStructTree();
-    if (!structTree || !structTree.children || structTree.children.length === 0) {
+    const tree = await page.getStructTree();
+    if (!tree || !tree.children || tree.children.length === 0) {
       el.taggedBadge.className = 'status-badge untagged';
       el.taggedBadge.textContent = 'Untagged PDF';
-      el.taggedTree.innerHTML = '<div class="empty-state">No logical structure tree (StructTree) found in this document. This is not a Tagged PDF.</div>';
+      el.taggedTree.innerHTML = '<div class="empty-state">Nessuna struttura logica (StructTree): l\'ordine di lettura è ricostruito dalla geometria.</div>';
       return;
     }
-
+    const used = currentPageResult()?.taggedOrder;
     el.taggedBadge.className = 'status-badge tagged';
-    el.taggedBadge.textContent = 'Tagged PDF';
-
-    const rootUl = document.createElement('div');
-    rootUl.className = 'tree-root';
-
-    for (const child of structTree.children) {
-      rootUl.appendChild(renderStructNode(child));
-    }
-
-    el.taggedTree.appendChild(rootUl);
+    el.taggedBadge.textContent = used ? 'Tagged PDF · ordine dai tag' : 'Tagged PDF';
+    const root = document.createElement('div');
+    root.className = 'tree-root';
+    for (const child of tree.children) root.appendChild(renderStructNode(child));
+    el.taggedTree.appendChild(root);
   } catch (err) {
     console.error('Error loading struct tree:', err);
     el.taggedBadge.className = 'status-badge untagged';
     el.taggedBadge.textContent = 'StructTree Error';
-    el.taggedTree.innerHTML = '<div class="empty-state font-red">Errore nel caricamento della struttura dei Tag.</div>';
   }
 }
 
 function renderStructNode(node) {
   const li = document.createElement('div');
   li.className = 'tree-node';
-
   const header = document.createElement('div');
   header.className = 'tree-node-header';
-
   const isLeaf = !node.children || node.children.length === 0;
-
   const toggle = document.createElement('span');
   toggle.className = 'tree-toggle';
   toggle.textContent = isLeaf ? '' : '▶';
   header.appendChild(toggle);
 
-  // Tag Badge (e.g. H1, P, Table, Part)
   const tagBadge = document.createElement('span');
   tagBadge.className = 'tag-badge';
-  const role = node.role || 'Element';
+  const role = node.role || (node.type === 'content' ? 'MC' : 'Element');
   tagBadge.textContent = role;
-
-  // Apply specific styles for semantic roles
-  if (role.startsWith('H') && role.length <= 3) {
-    tagBadge.classList.add('header-tag');
-  } else if (['P', 'Span', 'BlockQuote', 'Table', 'TR', 'TD'].includes(role)) {
-    tagBadge.classList.add('block-tag');
-  }
+  if (/^H\d?$/.test(role)) tagBadge.classList.add('header-tag');
+  else if (['P', 'Span', 'BlockQuote', 'Table', 'TR', 'TD'].includes(role)) tagBadge.classList.add('block-tag');
   header.appendChild(tagBadge);
 
   const title = document.createElement('span');
   title.className = 'tree-node-title';
-  title.textContent = node.title || (isLeaf ? 'Content Span' : 'Section Block');
+  title.textContent = node.alt || node.title || (node.type === 'content' ? node.id : isLeaf ? 'Content' : 'Section');
   header.appendChild(title);
-
   li.appendChild(header);
 
   if (!isLeaf) {
     li.classList.add('has-children');
-    const childrenContainer = document.createElement('div');
-    childrenContainer.className = 'tree-children';
-
-    for (const child of node.children) {
-      childrenContainer.appendChild(renderStructNode(child));
-    }
-
-    li.appendChild(childrenContainer);
-
-    toggle.addEventListener('click', (e) => {
-      e.stopPropagation();
-      li.classList.toggle('expanded');
-    });
+    const kids = document.createElement('div');
+    kids.className = 'tree-children';
+    for (const c of node.children) kids.appendChild(renderStructNode(c));
+    li.appendChild(kids);
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); li.classList.toggle('expanded'); });
   }
-
   return li;
 }
 
 // --------------------------------------------------------------------------
-// Recursive XY-Cut execution
+// Overlay
 // --------------------------------------------------------------------------
 
-async function runXYCutAnalysis() {
-  if (state.textItems.length === 0) {
-    el.domTreeContainer.innerHTML = '<div class="empty-state">No readable text contents found on this page.</div>';
-    clearOverlay();
-    return;
-  }
-
-  const pageBounds = {
-    x: 0,
-    y: 0,
-    w: el.pdfCanvas.width,
-    h: el.pdfCanvas.height
-  };
-
-  if (el.chkAutoGutter && el.chkAutoGutter.checked && window.__TAURI__) {
-    // --- AUTO-DETECT MODE: call Rust, update sliders, keep checkbox ON ---
-    const rustItems = state.textItems.map(item => ({
-      text: item.str,
-      x: item.x0,
-      y: item.y0,
-      width: item.x1 - item.x0,
-      height: item.y1 - item.y0,
-      font_size: item.fontSize,
-      font_name: item.fontName || null
-    }));
-
-    const rustPageBounds = { x: pageBounds.x, y: pageBounds.y, w: pageBounds.w, h: pageBounds.h };
-    const rustBorderedBoxes = state.currentPageRectangles.map(box => ({ x: box.x, y: box.y, w: box.w, h: box.h }));
-
-    showLoading(true);
-    try {
-      const jsonString = await window.__TAURI__.core.invoke('analyze_layout_auto_gutter', {
-        items: rustItems,
-        pageBounds: rustPageBounds,
-        borderedBoxes: rustBorderedBoxes,
-        strategy: el.selectAutoStrategy.value,
-        priority: state.priority
-      });
-      console.log('[Auto-Gutter] Rust returned, jsonString length:', jsonString?.length);
-      state.xycutResult = JSON.parse(jsonString);
-      console.log('[Auto-Gutter] root children:', state.xycutResult?.root?.children?.length,
-        state.xycutResult?.root?.children?.map(c => `x=${Math.round(c.bounds?.x)} w=${Math.round(c.bounds?.w)}`));
-
-      // Update the four sliders with the values Rust detected, but leave
-      // them disabled and the checkbox checked — the user is in auto mode.
-      if (state.xycutResult && state.xycutResult.projections) {
-        const { xGaps = [], yGaps = [] } = state.xycutResult.projections;
-
-        const significantThreshold = 5; // px — ignore noise gaps
-        const sigX = xGaps.filter(g => g.size >= significantThreshold);
-        const sigY = yGaps.filter(g => g.size >= significantThreshold);
-
-        const colGap = sigX.length ? Math.min(...sigX.map(g => g.size))
-          : xGaps.length ? Math.min(...xGaps.map(g => g.size)) : null;
-        const rowGap = sigY.length ? Math.min(...sigY.map(g => g.size))
-          : yGaps.length ? Math.min(...yGaps.map(g => g.size)) : null;
-
-        if (colGap !== null) {
-          state.thresholdX = Math.max(1, Math.round(colGap / state.zoomScale));
-          if (el.rangeX) el.rangeX.value = state.thresholdX;
-          if (el.valX) el.valX.textContent = state.thresholdX + ' px';
-        }
-        if (rowGap !== null) {
-          state.thresholdY = Math.max(1, Math.round(rowGap / state.zoomScale));
-          if (el.rangeY) el.rangeY.value = state.thresholdY;
-          if (el.valY) el.valY.textContent = state.thresholdY + ' px';
-        }
-      }
-    } catch (err) {
-      console.error('[Auto-Gutter] FAILED to run Rust XY-Cut:', err);
-      // Fallback to JS XY-Cut with current slider values
-      const options = {
-        thresholdX: state.thresholdX * state.zoomScale,
-        thresholdY: state.thresholdY * state.zoomScale,
-        minWidth: state.minWidth * state.zoomScale,
-        minHeight: state.minHeight * state.zoomScale,
-        priority: state.priority,
-        borderedBoxes: state.currentPageRectangles
-      };
-      state.xycutResult = performXYCut(state.textItems, pageBounds, options);
-    } finally {
-      showLoading(false);
-    }
-  } else {
-    // --- MANUAL MODE: use slider values as-is ---
-    const options = {
-      thresholdX: state.thresholdX * state.zoomScale,
-      thresholdY: state.thresholdY * state.zoomScale,
-      minWidth: state.minWidth * state.zoomScale,
-      minHeight: state.minHeight * state.zoomScale,
-      priority: state.priority,
-      borderedBoxes: state.currentPageRectangles
-    };
-    state.xycutResult = performXYCut(state.textItems, pageBounds, options);
-  }
-
-  state.selectedBlockId = null;
-  state.hoveredBlockId = null;
-
-  // Build visual DOM Tree inspector in right panel
-  renderLayoutDOMTree();
-
-  // Refresh overlay graphics
-  drawOverlay();
-
-  // Clear inspector details
-  el.inspectorPanel.innerHTML = '<div class="empty-state">Seleziona un blocco XY-Cut per ispezionarlo.</div>';
-}
-
-// --------------------------------------------------------------------------
-// Rendering Overlays (Cuts, Projection profiles & Bounding Boxes)
-// --------------------------------------------------------------------------
-
-function clearOverlay() {
+function overlayContext() {
   const ctx = el.overlayCanvas.getContext('2d');
+  const ratio = window.devicePixelRatio || 1;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, el.overlayCanvas.width, el.overlayCanvas.height);
+  // draw in PDF points
+  const k = ratio * state.zoomScale;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  return ctx;
 }
 
 function drawOverlay() {
-  if (!state.xycutResult) return;
+  if (!state.pdfDoc) return;
+  const ctx = overlayContext();
+  const z = state.zoomScale;
+  const px = (n) => n / z; // screen pixels → points (line widths)
+  const data = state.pageData.get(state.pageNum);
+  const pr = currentPageResult();
 
-  const ctx = el.overlayCanvas.getContext('2d');
-  ctx.clearRect(0, 0, el.overlayCanvas.width, el.overlayCanvas.height);
-
-  // 1. Draw Raw Character/Word Boxes
-  if (el.chkShowChars.checked) {
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
-    ctx.fillStyle = 'rgba(56, 189, 248, 0.03)';
-    ctx.lineWidth = 1;
-    for (const item of state.textItems) {
-      ctx.fillRect(item.x0, item.y0, item.x1 - item.x0, item.y1 - item.y0);
-      ctx.strokeRect(item.x0, item.y0, item.x1 - item.x0, item.y1 - item.y0);
+  if (el.chkShowChars.checked && data) {
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.04)';
+    ctx.lineWidth = px(1);
+    for (const it of data.items) {
+      ctx.fillRect(it.x, it.y, it.width, it.height);
+      ctx.strokeRect(it.x, it.y, it.width, it.height);
     }
   }
+  if (!pr) return;
 
-  // 2. Draw Recursive Cut Blocks (color-coded by depth)
-  if (el.chkShowBlocks.checked) {
-    drawBlockRecursive(ctx, state.xycutResult.root);
-  }
+  if (el.chkShowBlocks.checked) drawBlockRecursive(ctx, pr.root, px);
 
-  // 3. Draw Hovered & Selected Highlighting overlays
-  if (state.hoveredBlockId) {
-    const hoveredNode = findBlockById(state.xycutResult.root, state.hoveredBlockId);
-    if (hoveredNode) {
-      ctx.strokeStyle = 'rgba(244, 63, 94, 0.85)'; // Crimson rose accent
-      ctx.fillStyle = 'rgba(244, 63, 94, 0.08)';
-      ctx.lineWidth = 2.5;
-      const b = hoveredNode.bounds;
-      ctx.fillRect(b.x, b.y, b.w, b.h);
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
-    }
-  }
+  if (el.chkShowFlow.checked) drawFlow(ctx, pr, px);
 
-  if (state.selectedBlockId) {
-    const selectedNode = findBlockById(state.xycutResult.root, state.selectedBlockId);
-    if (selectedNode) {
-      ctx.strokeStyle = 'var(--accent)'; // Cyan selected focus
-      ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
-      ctx.lineWidth = 3;
-      // Draw corner brackets to look highly premium!
-      const b = selectedNode.bounds;
-      ctx.fillRect(b.x, b.y, b.w, b.h);
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
-    }
-  }
-
-  // 4. Draw Projection Profile density curves on bottom & right margins!
-  if (el.chkShowProjections.checked) {
-    drawProjectionProfiles(ctx);
-  }
-}
-
-// Recursively draws the block boundaries color coded by depth
-function drawBlockRecursive(ctx, block) {
-  if (block.isBorderedBox) {
-    ctx.strokeStyle = 'var(--accent-purple)';
-    ctx.fillStyle = 'rgba(192, 132, 252, 0.04)';
-    ctx.lineWidth = 2.5;
-    ctx.fillRect(block.bounds.x, block.bounds.y, block.bounds.w, block.bounds.h);
-    ctx.strokeRect(block.bounds.x, block.bounds.y, block.bounds.w, block.bounds.h);
-
-    if (block.children) {
-      for (const child of block.children) {
-        drawBlockRecursive(ctx, child);
+  if (state.selectedParaId) {
+    const p = state.paraById.get(state.selectedParaId);
+    if (p) {
+      ctx.fillStyle = 'rgba(244, 114, 182, 0.16)';
+      ctx.strokeStyle = 'rgba(244, 114, 182, 0.9)';
+      ctx.lineWidth = px(2);
+      for (const s of p.segments) {
+        if (s.pageNum !== state.pageNum) continue;
+        for (const l of s.lines) ctx.fillRect(l.x, l.y, l.w, l.h);
+        ctx.strokeRect(s.bounds.x - px(2), s.bounds.y - px(2), s.bounds.w + px(4), s.bounds.h + px(4));
       }
     }
-    return;
   }
 
-  if (block.type === 'leaf') {
-    // Leaf block
-    ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)'; // Mint Green for leaves
-    ctx.fillStyle = 'rgba(52, 211, 153, 0.02)';
-    ctx.lineWidth = 1.5;
-    ctx.fillRect(block.bounds.x, block.bounds.y, block.bounds.w, block.bounds.h);
-    ctx.strokeRect(block.bounds.x, block.bounds.y, block.bounds.w, block.bounds.h);
+  const hl = (id, stroke, fill, w) => {
+    const n = id && findBlockById(pr.root, id);
+    if (!n) return;
+    ctx.strokeStyle = stroke;
+    ctx.fillStyle = fill;
+    ctx.lineWidth = px(w);
+    ctx.fillRect(n.bounds.x, n.bounds.y, n.bounds.w, n.bounds.h);
+    ctx.strokeRect(n.bounds.x, n.bounds.y, n.bounds.w, n.bounds.h);
+  };
+  hl(state.hoveredBlockId, 'rgba(244, 63, 94, 0.85)', 'rgba(244, 63, 94, 0.08)', 2.5);
+  hl(state.selectedBlockId, '#00f0ff', 'rgba(0, 240, 255, 0.10)', 3);
+
+  if (el.chkShowProjections.checked) drawProjectionProfiles(ctx, pr, px);
+}
+
+function drawBlockRecursive(ctx, block, px) {
+  const b = block.bounds;
+  if (block.isBorderedBox) {
+    ctx.setLineDash([]);
+    ctx.strokeStyle = block.isTable ? 'rgba(250, 204, 21, 0.8)' : 'rgba(216, 180, 254, 0.85)';
+    ctx.lineWidth = px(2);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+  } else if (block.type === 'leaf') {
+    const c = roleColor(block.role);
+    ctx.setLineDash([]);
+    ctx.strokeStyle = c;
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = px(1.5);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = c;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.globalAlpha = 1;
     return;
+  } else if (block.type !== 'root') {
+    ctx.setLineDash([px(4), px(3)]);
+    ctx.strokeStyle = `hsla(${(block.depth * 55) % 360}, 75%, 65%, 0.35)`;
+    ctx.lineWidth = px(1);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.setLineDash([]);
+  }
+  for (const c of block.children || []) drawBlockRecursive(ctx, c, px);
+}
+
+/** Reading-order badges + continuation arrows between the pieces of a paragraph. */
+function drawFlow(ctx, pr, px) {
+  const leaves = [];
+  (function walk(n) { if (n.type === 'leaf') leaves.push(n); (n.children || []).forEach(walk); })(pr.root);
+
+  ctx.font = `600 ${px(11)}px Inter, sans-serif`;
+  ctx.textBaseline = 'middle';
+  for (const l of leaves) {
+    if (l.readingOrder === undefined || l.readingOrder === null) continue;
+    const label = String(l.readingOrder + 1);
+    const w = ctx.measureText(label).width + px(8);
+    const h = px(14);
+    const x = l.bounds.x - w - px(2);
+    const y = l.bounds.y;
+    ctx.fillStyle = roleColor(l.role);
+    roundRect(ctx, Math.max(0, x), y, w, h, px(3));
+    ctx.fill();
+    ctx.fillStyle = '#04111d';
+    ctx.fillText(label, Math.max(0, x) + px(4), y + h / 2);
   }
 
-  // Draw container bounding box with subtle dashed line
-  ctx.strokeStyle = `hsla(${(block.depth * 55) % 360}, 75%, 65%, 0.4)`;
-  ctx.lineWidth = Math.max(1, 3 - block.depth * 0.5);
-  ctx.strokeRect(block.bounds.x, block.bounds.y, block.bounds.w, block.bounds.h);
-
-  if (block.children) {
-    for (const child of block.children) {
-      drawBlockRecursive(ctx, child);
+  if (!state.doc) return;
+  const pageNum = state.pageNum;
+  for (const p of state.doc.paragraphs) {
+    if (p.segments.length < 2 || !p.segments.some(s => s.pageNum === pageNum)) continue;
+    const selected = p.id === state.selectedParaId;
+    ctx.strokeStyle = selected ? 'rgba(244, 114, 182, 1)' : 'rgba(244, 114, 182, 0.75)';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = px(selected ? 2.5 : 1.5);
+    for (let k = 0; k + 1 < p.segments.length; k++) {
+      const a = p.segments[k], b = p.segments[k + 1];
+      const aLast = a.lines[a.lines.length - 1] || a.bounds;
+      const bFirst = b.lines[0] || b.bounds;
+      const from = [aLast.x + aLast.w, aLast.y + aLast.h / 2];
+      const to = [bFirst.x, bFirst.y + bFirst.h / 2];
+      const join = p.joins.find(j => j.atSegment === k + 1);
+      if (a.pageNum === pageNum && b.pageNum === pageNum) {
+        drawArrow(ctx, from, to, px);
+      } else if (a.pageNum === pageNum) {
+        tag(ctx, `↪ p.${b.pageNum}${join?.dehyphenated ? ' ‐' : ''}`, from[0] + px(4), from[1], px);
+      } else if (b.pageNum === pageNum) {
+        // just above the first line: the reading-order badge sits to its left
+        tag(ctx, `↩ p.${a.pageNum}`, bFirst.x, bFirst.y - px(9), px);
+      }
     }
   }
 }
 
-// Renders the math projection gaps overlay
-function drawProjectionProfiles(ctx) {
-  const w = el.overlayCanvas.width;
-  const h = el.overlayCanvas.height;
+function drawArrow(ctx, [x1, y1], [x2, y2], px) {
+  ctx.setLineDash([px(5), px(3)]);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  const mx = (x1 + x2) / 2;
+  ctx.bezierCurveTo(mx, y1, mx, y2, x2, y2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  const ang = Math.atan2(y2 - (y1 + y2) / 2, x2 - mx) || 0;
+  const s = px(7);
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - s * Math.cos(ang - 0.4), y2 - s * Math.sin(ang - 0.4));
+  ctx.lineTo(x2 - s * Math.cos(ang + 0.4), y2 - s * Math.sin(ang + 0.4));
+  ctx.closePath();
+  ctx.fill();
+}
 
-  const marginSize = 25; // Margin overlay size
+function tag(ctx, text, x, y, px, alignRight = false) {
+  ctx.font = `600 ${px(10)}px Inter, sans-serif`;
+  const w = ctx.measureText(text).width + px(8);
+  const h = px(14);
+  const x0 = alignRight ? x - w : x;
+  ctx.save();
+  ctx.fillStyle = 'rgba(244, 114, 182, 0.95)';
+  roundRect(ctx, x0, y - h / 2, w, h, px(3));
+  ctx.fill();
+  ctx.fillStyle = '#1b0612';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x0 + px(4), y);
+  ctx.restore();
+}
 
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawProjectionProfiles(ctx, pr, px) {
+  const { w, h } = pr.pageBounds;
+  const band = px(25);
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(0, h - band, w, band);
+  ctx.fillRect(w - band, 0, band, h);
 
-  // Bottom horizontal band for X Projection (Vertical Gaps)
-  ctx.fillRect(0, h - marginSize, w, marginSize);
-  // Right vertical band for Y Projection (Horizontal Gaps)
-  ctx.fillRect(w - marginSize, 0, marginSize, h);
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0, h - marginSize, w, marginSize);
-  ctx.strokeRect(w - marginSize, 0, marginSize, h);
-
-  // Calculate vertical projection densities (overlapping blocks)
-  const xProfile = new Array(Math.ceil(w)).fill(0);
-  const yProfile = new Array(Math.ceil(h)).fill(0);
-
-  for (const item of state.textItems) {
-    const x0 = Math.max(0, Math.floor(item.x0));
-    const x1 = Math.min(w - 1, Math.ceil(item.x1));
-    for (let x = x0; x <= x1; x++) {
-      xProfile[x] = (xProfile[x] || 0) + 1;
-    }
-
-    const y0 = Math.max(0, Math.floor(item.y0));
-    const y1 = Math.min(h - 1, Math.ceil(item.y1));
-    for (let y = y0; y <= y1; y++) {
-      yProfile[y] = (yProfile[y] || 0) + 1;
-    }
+  const xs = new Array(Math.ceil(w)).fill(0);
+  const ys = new Array(Math.ceil(h)).fill(0);
+  for (const l of pr.lines) {
+    for (let x = Math.max(0, Math.floor(l.bounds.x)); x <= Math.min(w - 1, Math.ceil(l.bounds.x + l.bounds.w)); x++) xs[x]++;
+    for (let y = Math.max(0, Math.floor(l.bounds.y)); y <= Math.min(h - 1, Math.ceil(l.bounds.y + l.bounds.h)); y++) ys[y]++;
   }
+  const mx = Math.max(...xs, 1), my = Math.max(...ys, 1);
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.5)';
+  xs.forEach((v, x) => { if (v) { const bh = (v / mx) * (band - px(4)); ctx.fillRect(x, h - bh - px(2), 1, bh); } });
+  ctx.fillStyle = 'rgba(192, 132, 252, 0.5)';
+  ys.forEach((v, y) => { if (v) { const bw = (v / my) * (band - px(4)); ctx.fillRect(w - bw - px(2), y, bw, 1); } });
 
-  // Find max values for scale
-  const maxXVal = Math.max(...xProfile, 1);
-  const maxYVal = Math.max(...yProfile, 1);
-
-  // Draw X Projection Profile (Horizontal bottom band)
-  ctx.fillStyle = 'rgba(56, 189, 248, 0.45)'; // Accent Cyan
-  for (let x = 0; x < w; x++) {
-    const val = xProfile[x] || 0;
-    if (val > 0) {
-      const barH = (val / maxXVal) * (marginSize - 4);
-      ctx.fillRect(x, h - barH - 2, 1, barH);
-    }
-  }
-
-  // Draw Y Projection Profile (Vertical right band)
-  ctx.fillStyle = 'rgba(192, 132, 252, 0.45)'; // Accent Purple
-  for (let y = 0; y < h; y++) {
-    const val = yProfile[y] || 0;
-    if (val > 0) {
-      const barW = (val / maxYVal) * (marginSize - 4);
-      ctx.fillRect(w - barW - 2, y, barW, 1);
-    }
-  }
-
-  // Draw Gap Lines
-  ctx.fillStyle = 'rgba(251, 191, 36, 0.25)'; // Amber
-  if (state.xycutResult.projections) {
-    const { xGaps, yGaps } = state.xycutResult.projections;
-
-    // Draw columns vertical gap intervals
-    for (const gap of xGaps) {
-      ctx.fillRect(gap.start, 0, gap.end - gap.start, h - marginSize);
-      ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
-      ctx.beginPath();
-      ctx.moveTo(gap.start, 0); ctx.lineTo(gap.start, h - marginSize);
-      ctx.moveTo(gap.end, 0); ctx.lineTo(gap.end, h - marginSize);
-      ctx.stroke();
-    }
-
-    // Draw rows horizontal gap intervals
-    for (const gap of yGaps) {
-      ctx.fillRect(0, gap.start, w - marginSize, gap.end - gap.start);
-      ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
-      ctx.beginPath();
-      ctx.moveTo(0, gap.start); ctx.lineTo(w - marginSize, gap.start);
-      ctx.moveTo(0, gap.end); ctx.lineTo(w - marginSize, gap.end);
-      ctx.stroke();
-    }
-  }
+  ctx.fillStyle = 'rgba(251, 191, 36, 0.15)';
+  for (const g of pr.projections.xGaps) ctx.fillRect(g.start, 0, g.end - g.start, h - band);
+  for (const g of pr.projections.yGaps) ctx.fillRect(0, g.start, w - band, g.end - g.start);
 }
 
 // --------------------------------------------------------------------------
-// Generated Layout DOM Hierarchy rendering
+// Layout DOM tree
 // --------------------------------------------------------------------------
 
 function renderLayoutDOMTree() {
   el.domTreeContainer.innerHTML = '';
-  if (!state.xycutResult) return;
-
-  const rootNode = state.xycutResult.root;
-  const treeContainer = document.createElement('div');
-  treeContainer.className = 'dom-tree-root';
-
-  treeContainer.appendChild(buildDOMNodeHTML(rootNode));
-  el.domTreeContainer.appendChild(treeContainer);
+  const pr = currentPageResult();
+  if (!pr) {
+    el.domTreeContainer.innerHTML = `<div class="empty-state">${state.pdfDoc ? 'Analisi in corso…' : 'No layout analyzed yet.'}</div>`;
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'dom-tree-root';
+  wrap.appendChild(buildDOMNode(pr.root));
+  el.domTreeContainer.appendChild(wrap);
 }
 
-function buildDOMNodeHTML(node) {
+function buildDOMNode(node) {
   const div = document.createElement('div');
   div.className = 'dom-node';
   div.dataset.id = node.id;
 
   const header = document.createElement('div');
   header.className = 'dom-node-header';
-
   const toggle = document.createElement('span');
   toggle.className = 'dom-node-toggle';
   toggle.textContent = node.type === 'leaf' ? '' : '▶';
@@ -959,228 +773,257 @@ function buildDOMNodeHTML(node) {
 
   const label = document.createElement('span');
   label.className = 'dom-node-label';
-
-  // Format labels nicely
   if (node.type === 'root') {
-    label.textContent = 'DocumentRoot';
-    div.classList.add('expanded'); // Auto expand root
+    label.textContent = `Page ${state.pageNum}`;
+    div.classList.add('expanded');
   } else if (node.isBorderedBox) {
-    label.textContent = 'BorderedBox';
+    label.textContent = node.isTable ? 'Table' : 'Box';
     div.classList.add('bordered-box-node');
   } else if (node.type === 'leaf') {
-    label.textContent = 'TextLeaf';
+    label.textContent = `#${(node.readingOrder ?? 0) + 1}`;
   } else {
-    label.textContent = `Block_${node.cutDirection || 'Cut'}`;
+    label.textContent = `Cut_${node.cutDirection || '?'}`;
   }
   header.appendChild(label);
 
-  // Add a small snippet of text if it's a leaf
   if (node.type === 'leaf') {
+    const chip = document.createElement('span');
+    chip.className = 'role-chip';
+    chip.textContent = node.role || 'body';
+    chip.style.setProperty('--role-color', roleColor(node.role));
+    header.appendChild(chip);
     const snippet = document.createElement('span');
     snippet.className = 'dom-node-text-clip';
-    snippet.textContent = `"${node.text.substring(0, 30)}${node.text.length > 30 ? '...' : ''}"`;
+    const t = (node.text || '').replace(/\n/g, ' ');
+    snippet.textContent = `"${t.substring(0, 40)}${t.length > 40 ? '…' : ''}"`;
     header.appendChild(snippet);
   }
-
   div.appendChild(header);
 
-  // Mouse events inside list items
-  header.addEventListener('mouseenter', (e) => {
-    e.stopPropagation();
-    state.hoveredBlockId = node.id;
-    drawOverlay();
-
-    // Highlight list node visually
-    header.classList.add('hovered');
-  });
-
-  header.addEventListener('mouseleave', (e) => {
-    e.stopPropagation();
-    state.hoveredBlockId = null;
-    drawOverlay();
-    header.classList.remove('hovered');
-  });
-
-  header.addEventListener('click', (e) => {
-    e.stopPropagation();
-    selectDOMNode(node.id);
-  });
+  header.addEventListener('mouseenter', () => { state.hoveredBlockId = node.id; header.classList.add('hovered'); drawOverlay(); });
+  header.addEventListener('mouseleave', () => { state.hoveredBlockId = null; header.classList.remove('hovered'); drawOverlay(); });
+  header.addEventListener('click', (e) => { e.stopPropagation(); selectBlock(node.id); });
 
   if (node.children && node.children.length > 0) {
-    const childrenContainer = document.createElement('div');
-    childrenContainer.className = 'dom-node-children';
-
-    for (const child of node.children) {
-      childrenContainer.appendChild(buildDOMNodeHTML(child));
-    }
-
-    div.appendChild(childrenContainer);
-
-    toggle.addEventListener('click', (e) => {
-      e.stopPropagation();
-      div.classList.toggle('expanded');
-    });
+    const kids = document.createElement('div');
+    kids.className = 'dom-node-children';
+    for (const c of node.children) kids.appendChild(buildDOMNode(c));
+    div.appendChild(kids);
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); div.classList.toggle('expanded'); });
   }
-
   return div;
 }
 
-// Synchronized Selection
-function selectDOMNode(nodeId) {
+function selectBlock(nodeId, scroll = true) {
+  const pr = currentPageResult();
+  if (!pr) return;
+  const block = findBlockById(pr.root, nodeId);
+  if (!block) return;
   state.selectedBlockId = nodeId;
+  if (block.paragraphIds?.length && !block.paragraphIds.includes(state.selectedParaId)) {
+    state.selectedParaId = block.paragraphIds[0];
+  }
   drawOverlay();
+  refreshTranslationLayer();
+  highlightParagraphItem();
 
-  // Highlight list element
   document.querySelectorAll('.dom-node-header').forEach(h => h.classList.remove('active'));
-  const targetHeader = document.querySelector(`.dom-node[data-id="${nodeId}"] > .dom-node-header`);
-  if (targetHeader) {
-    targetHeader.classList.add('active');
-
-    // Ensure parent nodes are expanded
-    let parent = targetHeader.parentElement.parentElement;
+  const target = document.querySelector(`.dom-node[data-id="${CSS.escape(nodeId)}"] > .dom-node-header`);
+  if (target) {
+    target.classList.add('active');
+    let parent = target.parentElement.parentElement;
     while (parent && parent.classList.contains('dom-node-children')) {
-      const parentBlock = parent.parentElement;
-      if (parentBlock) {
-        parentBlock.classList.add('expanded');
-      }
-      parent = parentBlock.parentElement;
+      parent.parentElement?.classList.add('expanded');
+      parent = parent.parentElement?.parentElement;
     }
-
-    targetHeader.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (scroll) target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
-
-  // Update properties inspector
-  const block = findBlockById(state.xycutResult.root, nodeId);
-  if (block) {
-    populateInspector(block);
-  }
+  populateBlockInspector(block);
 }
 
 // --------------------------------------------------------------------------
-// Properties Formatting Inspector
+// Logical paragraphs panel
 // --------------------------------------------------------------------------
 
-function populateInspector(block) {
+function renderParagraphList() {
+  const list = el.paragraphList;
+  list.innerHTML = '';
+  const doc = state.doc;
+  if (!doc) {
+    el.analysisStats.textContent = state.pdfDoc ? 'Analisi non ancora disponibile.' : 'Nessuna analisi.';
+    return;
+  }
+  const s = doc.stats;
+  const pr = currentPageResult();
+  el.analysisStats.innerHTML = `<b>${s.paragraphCount}</b> paragrafi logici · <b>${s.stitchedJoins}</b> cuciture · corpo ${s.bodyFontSize} pt` +
+    (pr?.taggedOrder ? ' · <span class="ok">ordine dai tag</span>' : '');
+
+  const all = el.chkAllParagraphs.checked;
+  const paras = doc.paragraphs.filter(p => all || p.segments.some(seg => seg.pageNum === state.pageNum));
+  if (paras.length === 0) {
+    list.innerHTML = '<div class="empty-state">Nessun testo su questa pagina.</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const p of paras.slice(0, 2000)) {
+    const item = document.createElement('div');
+    item.className = 'para-item';
+    item.dataset.id = p.id;
+    if (p.id === state.selectedParaId) item.classList.add('active');
+    const pages = [...new Set(p.segments.map(seg => seg.pageNum))];
+    const head = document.createElement('div');
+    head.className = 'para-head';
+    head.innerHTML = `<span class="role-chip" style="--role-color:${roleColor(p.role)}">${p.role}</span>` +
+      `<span class="para-id">${p.id}</span>` +
+      (pages.length > 1 ? `<span class="para-span">p.${pages[0]}→${pages[pages.length - 1]}</span>` : '') +
+      (p.joins.length ? `<span class="para-joins" title="${p.joins.map(j => j.kind + (j.interrupted ? ' (interrotto)' : '') + (j.dehyphenated ? ' (sillabato)' : '')).join(', ')}">⟲ ${p.joins.length}</span>` : '') +
+      (state.translations.has(p.id) ? '<span class="para-tr" title="Tradotto">✓</span>' : '');
+    const body = document.createElement('div');
+    body.className = 'para-text';
+    body.textContent = p.text.length > 180 ? p.text.slice(0, 180) + '…' : p.text;
+    item.append(head, body);
+    item.addEventListener('click', () => selectParagraph(p.id));
+    frag.appendChild(item);
+  }
+  list.appendChild(frag);
+}
+
+function highlightParagraphItem() {
+  el.paragraphList.querySelectorAll('.para-item').forEach(i => i.classList.toggle('active', i.dataset.id === state.selectedParaId));
+}
+
+function selectParagraph(id) {
+  const p = state.paraById.get(id);
+  if (!p) return;
+  state.selectedParaId = id;
+  state.selectedBlockId = null;
+  const onPage = p.segments.find(s => s.pageNum === state.pageNum);
+  if (!onPage) {
+    gotoPage(p.segments[0].pageNum);
+  } else {
+    drawOverlay();
+    refreshTranslationLayer();
+  }
+  highlightParagraphItem();
+  populateParagraphInspector(p);
+}
+
+// --------------------------------------------------------------------------
+// Inspector
+// --------------------------------------------------------------------------
+
+function card(label, val, extra = '') {
+  const c = document.createElement('div');
+  c.className = 'inspector-card' + (extra ? ' ' + extra : '');
+  const l = document.createElement('div');
+  l.className = 'inspector-card-label';
+  l.textContent = label;
+  const v = document.createElement('div');
+  v.className = 'inspector-card-val';
+  v.textContent = val;
+  c.append(l, v);
+  return c;
+}
+
+function textBox(title, text) {
+  const wrap = document.createDocumentFragment();
+  const t = document.createElement('div');
+  t.className = 'inspector-card-label';
+  t.style.marginTop = '8px';
+  t.textContent = title;
+  const box = document.createElement('textarea');
+  box.className = 'inspector-text-box';
+  box.readOnly = true;
+  box.value = text;
+  box.title = 'Clicca per copiare';
+  box.addEventListener('click', () => {
+    box.select();
+    navigator.clipboard?.writeText(text);
+    const old = t.textContent;
+    t.textContent = '✓ Copiato negli appunti!';
+    setTimeout(() => { t.textContent = old; }, 1200);
+  });
+  wrap.append(t, box);
+  return wrap;
+}
+
+function populateBlockInspector(block) {
   el.inspectorPanel.innerHTML = '';
-
-  const container = document.createElement('div');
-  container.className = 'inspector-layout';
-
+  const c = document.createElement('div');
+  c.className = 'inspector-layout';
   const grid = document.createElement('div');
   grid.className = 'inspector-grid';
-
-  // Bounds
-  const xTL = Math.round(block.bounds.x);
-  const yTL = Math.round(block.bounds.y);
-  const xBR = Math.round(block.bounds.x + block.bounds.w);
-  const yBR = Math.round(block.bounds.y + block.bounds.h);
-
-  grid.appendChild(createInspectorCard('ID & Type', block.id + ` (${block.type})`));
-  grid.appendChild(createInspectorCard('Dimensions', `${Math.round(block.bounds.w)}x${Math.round(block.bounds.h)} px`));
-  grid.appendChild(createInspectorCard('Coordinates', `TL: (${xTL}px, ${yTL}px) | BR: (${xBR}px, ${yBR}px)`));
-  grid.appendChild(createInspectorCard('Hierarchy Depth', `Depth Level ${block.depth}`));
-
+  const b = block.bounds;
+  grid.appendChild(card('ID / tipo', `${block.id} (${block.type})`));
+  grid.appendChild(card('Ruolo', block.role || (block.isBorderedBox ? (block.isTable ? 'table' : 'box') : '—')));
+  grid.appendChild(card('Dimensioni', `${Math.round(b.w)}×${Math.round(b.h)} pt`));
+  grid.appendChild(card('Ordine di lettura', block.readingOrder !== undefined && block.readingOrder !== null ? `#${block.readingOrder + 1}` : '—'));
   if (block.type === 'leaf') {
-    // Dominant Formatting parameters
     const f = block.formatting;
-    grid.appendChild(createInspectorCard('Dominant Font', f.fontFamily, 'font-desc'));
-    grid.appendChild(createInspectorCard('Average Size', `${f.avgFontSize} px (DOM Size: ${f.fontSize}px)`));
-    grid.appendChild(createInspectorCard('Style / Weight', `${f.fontWeight} / ${f.fontStyle}`));
-    grid.appendChild(createInspectorCard('Text Align', f.alignment.toUpperCase()));
-
-    container.appendChild(grid);
-
-    // Contained Text Box
-    const textTitle = document.createElement('div');
-    textTitle.className = 'inspector-card-label';
-    textTitle.style.marginTop = '8px';
-    textTitle.textContent = 'Contained Text Content:';
-    container.appendChild(textTitle);
-
-    const textBox = document.createElement('textarea');
-    textBox.className = 'inspector-text-box';
-    textBox.readOnly = true;
-    textBox.value = block.text;
-    textBox.title = 'Clicca per copiare';
-
-    textBox.addEventListener('click', () => {
-      textBox.select();
-      navigator.clipboard.writeText(block.text);
-      // Small visual confirm toast
-      const oldLabel = textTitle.textContent;
-      textTitle.textContent = '✓ Copiato negli appunti!';
-      textTitle.style.color = 'var(--accent-green)';
-      setTimeout(() => {
-        textTitle.textContent = oldLabel;
-        textTitle.style.color = '';
-      }, 1500);
-    });
-
-    container.appendChild(textBox);
+    grid.appendChild(card('Font', f.fontFamily, 'font-desc'));
+    grid.appendChild(card('Corpo', `${f.fontSize} pt (media ${f.avgFontSize})`));
+    grid.appendChild(card('Peso / stile', `${f.fontWeight} / ${f.fontStyle}`));
+    grid.appendChild(card('Allineamento', f.alignment.toUpperCase()));
+    c.appendChild(grid);
+    c.appendChild(textBox('Testo del blocco:', block.text || ''));
+    for (const pid of block.paragraphIds || []) {
+      const p = state.paraById.get(pid);
+      if (!p) continue;
+      const btn = document.createElement('button');
+      btn.className = 'btn secondary-btn w-full para-link';
+      btn.textContent = `${pid} · ${p.role}${p.segments.length > 1 ? ` · ${p.segments.length} parti` : ''} →`;
+      btn.addEventListener('click', () => selectParagraph(pid));
+      c.appendChild(btn);
+    }
   } else {
-    // Container block specifics
-    grid.appendChild(createInspectorCard('Partition Split', `Along ${block.cutDirection}-Axis`, 'span-2'));
-    grid.appendChild(createInspectorCard('Child Branches', `${block.children ? block.children.length : 0} blocks`, 'span-2'));
-    container.appendChild(grid);
+    grid.appendChild(card('Taglio', block.cutDirection ? `asse ${block.cutDirection}` : '—', 'span-2'));
+    grid.appendChild(card('Figli', `${block.children ? block.children.length : 0}`, 'span-2'));
+    c.appendChild(grid);
   }
-
-  el.inspectorPanel.appendChild(container);
+  el.inspectorPanel.appendChild(c);
 }
 
-function createInspectorCard(label, val, extraClass = '') {
-  const card = document.createElement('div');
-  card.className = 'inspector-card';
-  if (extraClass) card.classList.add(extraClass);
-
-  const lblDiv = document.createElement('div');
-  lblDiv.className = 'inspector-card-label';
-  lblDiv.textContent = label;
-
-  const valDiv = document.createElement('div');
-  valDiv.className = 'inspector-card-val';
-  valDiv.textContent = val;
-
-  card.appendChild(lblDiv);
-  card.appendChild(valDiv);
-  return card;
+function populateParagraphInspector(p) {
+  if (!p) return;
+  el.inspectorPanel.innerHTML = '';
+  const c = document.createElement('div');
+  c.className = 'inspector-layout';
+  const grid = document.createElement('div');
+  grid.className = 'inspector-grid';
+  const pages = [...new Set(p.segments.map(s => s.pageNum))];
+  grid.appendChild(card('Paragrafo', `${p.id} · ${p.role}`));
+  grid.appendChild(card('Pagine', pages.join(', ')));
+  grid.appendChild(card('Parti', `${p.segments.length} (${p.segments.map(s => s.blockId).join(', ')})`, 'span-2'));
+  if (p.joins.length) {
+    const desc = p.joins.map(j => `${j.kind}${j.interrupted ? ', interrotto' : ''}${j.dehyphenated ? ', sillabazione ricomposta' : ''}`).join(' · ');
+    grid.appendChild(card('Cuciture', desc, 'span-2'));
+  }
+  c.appendChild(grid);
+  c.appendChild(textBox('Testo ricostruito (unità di traduzione):', p.text));
+  if (state.translations.has(p.id)) c.appendChild(textBox('Traduzione:', state.translations.get(p.id)));
+  el.inspectorPanel.appendChild(c);
 }
 
 // --------------------------------------------------------------------------
-// Bi-directional interaction logic on Canvas
+// Canvas interaction
 // --------------------------------------------------------------------------
+
+function canvasPoint(e) {
+  const rect = el.overlayCanvas.getBoundingClientRect();
+  return [(e.clientX - rect.left) / state.zoomScale, (e.clientY - rect.top) / state.zoomScale];
+}
 
 function handleCanvasMouseMove(e) {
-  if (!state.xycutResult) return;
-
-  const rect = el.overlayCanvas.getBoundingClientRect();
-  const scaleX = el.overlayCanvas.width / rect.width;
-  const scaleY = el.overlayCanvas.height / rect.height;
-
-  // Calculate relative pixel coordinates inside canvas
-  const canvasX = (e.clientX - rect.left) * scaleX;
-  const canvasY = (e.clientY - rect.top) * scaleY;
-
-  // Find deepest leaf/container node enclosing this point
-  const matchedBlock = findDeepestBlockAt(state.xycutResult.root, canvasX, canvasY);
-
-  if (matchedBlock) {
-    if (state.hoveredBlockId !== matchedBlock.id) {
-      state.hoveredBlockId = matchedBlock.id;
-      drawOverlay();
-
-      // Update DOM list highlights
-      document.querySelectorAll('.dom-node-header').forEach(h => h.classList.remove('hovered'));
-      const header = document.querySelector(`.dom-node[data-id="${matchedBlock.id}"] > .dom-node-header`);
-      if (header) {
-        header.classList.add('hovered');
-      }
-    }
-  } else {
-    if (state.hoveredBlockId !== null) {
-      state.hoveredBlockId = null;
-      drawOverlay();
-      document.querySelectorAll('.dom-node-header').forEach(h => h.classList.remove('hovered'));
-    }
+  const pr = currentPageResult();
+  if (!pr) return;
+  const [x, y] = canvasPoint(e);
+  const m = findDeepestBlockAt(pr.root, x, y);
+  const id = m && m.type !== 'root' ? m.id : null;
+  if (id !== state.hoveredBlockId) {
+    state.hoveredBlockId = id;
+    drawOverlay();
+    document.querySelectorAll('.dom-node-header.hovered').forEach(h => h.classList.remove('hovered'));
+    if (id) document.querySelector(`.dom-node[data-id="${CSS.escape(id)}"] > .dom-node-header`)?.classList.add('hovered');
   }
 }
 
@@ -1188,257 +1031,167 @@ function handleCanvasMouseOut() {
   if (state.hoveredBlockId !== null) {
     state.hoveredBlockId = null;
     drawOverlay();
-    document.querySelectorAll('.dom-node-header').forEach(h => h.classList.remove('hovered'));
+    document.querySelectorAll('.dom-node-header.hovered').forEach(h => h.classList.remove('hovered'));
   }
 }
-
-function handleCanvasMouseClick(e) {
-  if (state.hoveredBlockId) {
-    selectDOMNode(state.hoveredBlockId);
-  }
-}
-
-// --------------------------------------------------------------------------
-// Block Search Utilities
-// --------------------------------------------------------------------------
 
 function findBlockById(root, id) {
   if (root.id === id) return root;
-  if (root.children) {
-    for (const child of root.children) {
-      const found = findBlockById(child, id);
-      if (found) return found;
-    }
+  for (const c of root.children || []) {
+    const f = findBlockById(c, id);
+    if (f) return f;
   }
   return null;
 }
 
 function findDeepestBlockAt(root, x, y) {
   const b = root.bounds;
-  // If point is outside block, ignore branch
-  if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) {
-    return null;
+  if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) return null;
+  for (const c of root.children || []) {
+    const m = findDeepestBlockAt(c, x, y);
+    if (m) return m;
   }
-
-  if (root.children && root.children.length > 0) {
-    for (const child of root.children) {
-      const matched = findDeepestBlockAt(child, x, y);
-      if (matched) return matched;
-    }
-  }
-
-  // Return the leaf (or deepest container) that encompasses the coordinate
   return root;
 }
 
 // --------------------------------------------------------------------------
-// Exports
+// Translation
 // --------------------------------------------------------------------------
 
-function exportLayoutDOM(format) {
-  if (!state.xycutResult) {
-    alert('Nessun layout analizzato. Carica prima un PDF!');
-    return;
-  }
-
+async function recomputePieces() {
+  state.pieces.clear();
+  if (!state.doc || state.translations.size === 0 || !isTauri()) return;
+  const paras = state.doc.paragraphs.filter(p => state.translations.has(p.id));
+  const units = paras.map(p => ({ text: state.translations.get(p.id), weights: p.segments.map(s => s.charCount) }));
   try {
-    const content = serializeLayoutTree(state.xycutResult.root, format);
-
-    // Create a virtual download link
-    const mimeMap = {
-      'json': 'application/json',
-      'xml': 'application/xml',
-      'html': 'text/html'
-    };
-
-    const blob = new Blob([content], { type: mimeMap[format] || 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `pdf_layout_page_${state.pageNum}.${format}`;
-    document.body.appendChild(link);
-    link.click();
-
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    const parts = await window.__TAURI__.core.invoke('distribute_translations', { units });
+    paras.forEach((p, i) => state.pieces.set(p.id, parts[i]));
   } catch (err) {
-    console.error('Error exporting layout:', err);
-    alert('Errore durante l\'esportazione del file: ' + err.message);
+    console.error('distribute_translations failed', err);
+  }
+}
+
+function refreshTranslationLayer() {
+  const show = el.chkShowTranslation.checked;
+  el.translationLayer.style.display = show ? 'block' : 'none';
+  if (!show) return;
+  const r = renderTranslationLayer(el.translationLayer, state.doc, state.pieces, state.pageNum, state.zoomScale, state.selectedParaId);
+  if (state.translations.size === 0) {
+    setStatus('Nessuna traduzione: usa "Pseudo" o "Importa".', 'warn');
+  } else if (r.rendered) {
+    setStatus(`Traduzione: ${r.rendered} blocchi · ${r.shrunk} ridotti` + (r.overflow ? ` · ⚠ ${r.overflow} non entrano` : ''), r.overflow ? 'warn' : 'ok');
+  }
+}
+
+async function applyPseudoTranslation() {
+  if (!state.doc) return;
+  state.translations = new Map(state.doc.paragraphs.filter(p => p.translatable).map(p => [p.id, pseudoTranslate(p.text)]));
+  await recomputePieces();
+  el.chkShowTranslation.checked = true;
+  renderParagraphList();
+  refreshTranslationLayer();
+}
+
+async function importTranslations(e) {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const map = parseTranslations(await file.text());
+    if (map.size === 0) throw new Error('nessuna traduzione trovata nel file');
+    const known = state.doc ? [...map.keys()].filter(k => state.paraById.has(k)).length : 0;
+    state.translations = map;
+    await recomputePieces();
+    el.chkShowTranslation.checked = true;
+    renderParagraphList();
+    refreshTranslationLayer();
+    if (state.doc && known < map.size) {
+      setStatus(`Importate ${map.size} traduzioni, ${map.size - known} con id sconosciuto (analisi cambiata?)`, 'warn');
+    }
+  } catch (err) {
+    alert('Importazione fallita: ' + err.message);
   }
 }
 
 // --------------------------------------------------------------------------
-// Custom Resizable Sidebars Drag Logic
+// Export
+// --------------------------------------------------------------------------
+
+function download(content, name, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportData(format) {
+  if (!state.doc) {
+    alert('Nessun layout analizzato. Carica prima un PDF!');
+    return;
+  }
+  const base = (state.fileName || 'document').replace(/\.pdf$/i, '');
+  const pr = currentPageResult();
+  switch (format) {
+    case 'json':
+    case 'xml':
+    case 'html':
+      if (!pr) return;
+      download(serializeLayoutTree(pr.root, format), `${base}_p${state.pageNum}.${format}`,
+        { json: 'application/json', xml: 'application/xml', html: 'text/html' }[format]);
+      break;
+    case 'doc-json':
+      download(JSON.stringify(state.doc, null, 2), `${base}_layout.json`, 'application/json');
+      break;
+    case 'txt':
+      download(serializeParagraphsText(state.doc), `${base}_paragraphs.txt`, 'text/plain');
+      break;
+    case 'units':
+      download(serializeUnits(state.doc, state.fileName), `${base}_units.json`, 'application/json');
+      break;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Resizable sidebars
 // --------------------------------------------------------------------------
 
 function setupResizableSidebars() {
   const container = document.querySelector('.app-container');
-  const leftResizer = document.getElementById('left-resizer');
-  const rightResizer = document.getElementById('right-resizer');
-  const inspectorSection = document.getElementById('inspector-section');
-  const inspectorResizer = document.getElementById('inspector-resizer');
+  const drag = (handle, cursor, onMove) => {
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      handle.classList.add('dragging');
+      document.body.style.cursor = cursor;
+      const start = { x: e.clientX, y: e.clientY };
+      const move = (ev) => onMove(ev, start);
+      const up = () => {
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    });
+  };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-  const MIN_LEFT_WIDTH = 320;
-  const MIN_RIGHT_WIDTH = 340;
-  const MIN_INSPECTOR_HEIGHT = 120;
-  const MAX_INSPECTOR_HEIGHT = 450;
-
-  leftResizer.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    leftResizer.classList.add('dragging');
-    document.body.style.cursor = 'col-resize';
-
-    function onMouseMove(moveEvent) {
-      let newWidth = moveEvent.clientX - 16;
-      if (newWidth < MIN_LEFT_WIDTH) newWidth = MIN_LEFT_WIDTH;
-      const maxLeft = window.innerWidth * 0.45;
-      if (newWidth > maxLeft) newWidth = maxLeft;
-
-      container.style.setProperty('--left-width', newWidth + 'px');
-    }
-
-    function onMouseUp() {
-      leftResizer.classList.remove('dragging');
-      document.body.style.cursor = '';
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+  drag(document.getElementById('left-resizer'), 'col-resize', (ev) => {
+    container.style.setProperty('--left-width', clamp(ev.clientX - 16, 320, window.innerWidth * 0.45) + 'px');
   });
-
-  rightResizer.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    rightResizer.classList.add('dragging');
-    document.body.style.cursor = 'col-resize';
-
-    function onMouseMove(moveEvent) {
-      let newWidth = window.innerWidth - moveEvent.clientX - 16;
-      if (newWidth < MIN_RIGHT_WIDTH) newWidth = MIN_RIGHT_WIDTH;
-      const maxRight = window.innerWidth * 0.45;
-      if (newWidth > maxRight) newWidth = maxRight;
-
-      container.style.setProperty('--right-width', newWidth + 'px');
-    }
-
-    function onMouseUp() {
-      rightResizer.classList.remove('dragging');
-      document.body.style.cursor = '';
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+  drag(document.getElementById('right-resizer'), 'col-resize', (ev) => {
+    container.style.setProperty('--right-width', clamp(window.innerWidth - ev.clientX - 16, 340, window.innerWidth * 0.45) + 'px');
   });
-
-  inspectorResizer.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    inspectorResizer.classList.add('dragging');
-    document.body.style.cursor = 'row-resize';
-
-    const startY = e.clientY;
-    const startHeight = inspectorSection.getBoundingClientRect().height;
-
-    function onMouseMove(moveEvent) {
-      let newHeight = startHeight - (moveEvent.clientY - startY);
-      if (newHeight < MIN_INSPECTOR_HEIGHT) newHeight = MIN_INSPECTOR_HEIGHT;
-      if (newHeight > MAX_INSPECTOR_HEIGHT) newHeight = MAX_INSPECTOR_HEIGHT;
-
-      container.style.setProperty('--inspector-height', newHeight + 'px');
-    }
-
-    function onMouseUp() {
-      inspectorResizer.classList.remove('dragging');
-      document.body.style.cursor = '';
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  });
-}
-
-// --------------------------------------------------------------------------
-// Rectangle Extraction from Page Vector Operations
-// --------------------------------------------------------------------------
-
-async function extractRectangles(page, viewport) {
-  const rectangles = [];
-  try {
-    const opList = await page.getOperatorList();
-    let currentPath = [];
-
-    for (let i = 0; i < opList.fnArray.length; i++) {
-      const fn = opList.fnArray[i];
-      const args = opList.argsArray[i];
-
-      if (fn === pdfjsLib.OPS.constructPath) {
-        const pathOps = args[0];
-        const pathArgs = args[1];
-
-        if (pathOps && typeof pathOps.length === 'number') {
-          let argIdx = 0;
-          for (let k = 0; k < pathOps.length; k++) {
-            const op = pathOps[k];
-            if (op === 13) { // OPS.rectangle (re)
-              const x = pathArgs[argIdx++];
-              const y = pathArgs[argIdx++];
-              const w = pathArgs[argIdx++];
-              const h = pathArgs[argIdx++];
-
-              const screenRect = viewport.convertToViewportRectangle([x, y, x + w, y + h]);
-              rectangles.push({
-                x: Math.min(screenRect[0], screenRect[2]),
-                y: Math.min(screenRect[1], screenRect[3]),
-                w: Math.abs(screenRect[2] - screenRect[0]),
-                h: Math.abs(screenRect[3] - screenRect[1])
-              });
-            } else if (op === 1) { // OPS.moveTo (m)
-              const x = pathArgs[argIdx++];
-              const y = pathArgs[argIdx++];
-              currentPath = [{ x, y }];
-            } else if (op === 2) { // OPS.lineTo (l)
-              const x = pathArgs[argIdx++];
-              const y = pathArgs[argIdx++];
-              currentPath.push({ x, y });
-            } else if (op === 5) { // OPS.closePath (h)
-              if (currentPath.length === 4 || currentPath.length === 5) {
-                const xs = currentPath.map(p => p.x);
-                const ys = currentPath.map(p => p.y);
-                const minX = Math.min(...xs);
-                const maxX = Math.max(...xs);
-                const minY = Math.min(...ys);
-                const maxY = Math.max(...ys);
-
-                const w = maxX - minX;
-                const h = maxY - minY;
-                if (w > 10 && h > 10) {
-                  const screenRect = viewport.convertToViewportRectangle([minX, minY, maxX, maxY]);
-                  rectangles.push({
-                    x: Math.min(screenRect[0], screenRect[2]),
-                    y: Math.min(screenRect[1], screenRect[3]),
-                    w: Math.abs(screenRect[2] - screenRect[0]),
-                    h: Math.abs(screenRect[3] - screenRect[1])
-                  });
-                }
-              }
-              currentPath = [];
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('Error extracting rectangles from vector paths:', err);
-  }
-
-  const pageWidth = viewport.width;
-  const pageHeight = viewport.height;
-
-  return rectangles.filter(r => {
-    return r.w > 20 && r.h > 10 && r.w < pageWidth * 0.98 && r.h < pageHeight * 0.98;
+  const inspector = document.getElementById('inspector-section');
+  let startH = 0;
+  const ir = document.getElementById('inspector-resizer');
+  ir.addEventListener('mousedown', () => { startH = inspector.getBoundingClientRect().height; });
+  drag(ir, 'row-resize', (ev, start) => {
+    container.style.setProperty('--inspector-height', clamp(startH - (ev.clientY - start.y), 120, 450) + 'px');
   });
 }

@@ -33,7 +33,11 @@
           </button>
           <button class="tab-btn" id="tab-tagged" data-target="panel-tagged">
             <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
-            Tagged PDF
+            Tagged
+          </button>
+          <button class="tab-btn" id="tab-paragraphs" data-target="panel-paragraphs">
+            <svg class="tab-icon" viewBox="0 0 24 24"><path d="M3 5h18v2H3V5zm0 4h12v2H3V9zm0 4h18v2H3v-2zm0 4h12v2H3v-2z"/></svg>
+            Paragrafi
           </button>
         </div>
 
@@ -45,6 +49,19 @@
             </div>
           </div>
           
+          <!-- LOGICAL PARAGRAPHS PANEL -->
+          <div class="tab-panel" id="panel-paragraphs">
+            <div id="analysis-stats" class="analysis-stats">Nessuna analisi.</div>
+            <label class="checkbox-container small" title="Mostra i paragrafi di tutto il documento invece che solo quelli della pagina corrente">
+              <input type="checkbox" id="chk-all-paragraphs" />
+              <span class="checkmark"></span>
+              Tutto il documento
+            </label>
+            <div id="paragraph-list" class="paragraph-list">
+              <div class="empty-state">Carica un PDF per ricostruire il flusso di lettura.</div>
+            </div>
+          </div>
+
           <!-- TAGGED PDF PANEL -->
           <div class="tab-panel" id="panel-tagged">
             <div id="tagged-status-badge" class="status-badge untagged">Checking...</div>
@@ -114,11 +131,31 @@
               Blocks
             </label>
             <label class="checkbox-container" title="Mostra le proiezioni e istogrammi dei vuoti">
-              <input type="checkbox" id="chk-show-projections" checked />
+              <input type="checkbox" id="chk-show-projections" />
               <span class="checkmark"></span>
               Projections
             </label>
+            <label class="checkbox-container" title="Mostra ordine di lettura e continuazioni dei paragrafi tra colonne e pagine">
+              <input type="checkbox" id="chk-show-flow" checked />
+              <span class="checkmark"></span>
+              Flow
+            </label>
           </div>
+
+          <div class="toolbar-divider"></div>
+
+          <!-- Translation -->
+          <div class="toolbar-group translation-group">
+            <label class="checkbox-container" title="Sovrapponi la traduzione al testo originale">
+              <input type="checkbox" id="chk-show-translation" />
+              <span class="checkmark"></span>
+              Traduzione
+            </label>
+            <button id="btn-pseudo" class="btn secondary-btn compact" title="Pseudo-traduzione (+30% di lunghezza) per collaudare re-flow e adattamento">Pseudo</button>
+            <button id="btn-import-tr" class="btn secondary-btn compact" title="Importa traduzioni (JSON: {id: testo} oppure il file delle unità compilato)">Importa</button>
+            <input type="file" id="tr-file-selector" accept="application/json,.json" style="display: none;" />
+          </div>
+          <span id="analysis-status" class="analysis-status"></span>
         </header>
 
         <!-- Document Viewer Workspace -->
@@ -133,6 +170,7 @@
             <!-- Canvas Container -->
             <div class="canvas-container" id="canvas-container">
               <canvas id="pdf-canvas"></canvas>
+              <div id="translation-layer" class="translation-layer"></div>
               <canvas id="overlay-canvas"></canvas>
             </div>
           </div>
@@ -145,7 +183,7 @@
         
         <!-- Section A: XY-Cut Config -->
         <section class="config-section">
-          <h3>XY-Cut Parameters</h3>
+          <h3>Layout Engine</h3>
           <div class="control-grid">
             
             <!-- Auto-Detect Gutters -->
@@ -153,7 +191,7 @@
               <label class="checkbox-container" title="Abilita l'autodeterminazione automatica dei gutter tramite backend Rust">
                 <input type="checkbox" id="chk-auto-gutter" checked />
                 <span class="checkmark"></span>
-                Auto-Detect Gutters (Rust)
+                Soglie automatiche
               </label>
             </div>
 
@@ -173,8 +211,8 @@
             <!-- Y threshold slider -->
             <div class="control-item">
               <div class="control-label">
-                <span>Row Gap ($T_y$) [px]</span>
-                <span class="control-val" id="val-threshold-y">10 px</span>
+                <span>Row Gap ($T_y$) [pt]</span>
+                <span class="control-val" id="val-threshold-y">10 pt</span>
               </div>
               <input type="range" id="range-threshold-y" min="2" max="60" value="10" />
             </div>
@@ -182,8 +220,8 @@
             <!-- X threshold slider -->
             <div class="control-item">
               <div class="control-label">
-                <span>Column Gap ($T_x$) [px]</span>
-                <span class="control-val" id="val-threshold-x">15 px</span>
+                <span>Column Gap ($T_x$) [pt]</span>
+                <span class="control-val" id="val-threshold-x">15 pt</span>
               </div>
               <input type="range" id="range-threshold-x" min="2" max="60" value="15" />
             </div>
@@ -191,19 +229,19 @@
             <!-- Min Width -->
             <div class="control-item">
               <div class="control-label">
-                <span>Min Block Width [px]</span>
-                <span class="control-val" id="val-min-w">100 px</span>
+                <span>Min Block Width [pt]</span>
+                <span class="control-val" id="val-min-w">20 pt</span>
               </div>
-              <input type="range" id="range-min-w" min="0" max="500" value="100" />
+              <input type="range" id="range-min-w" min="0" max="300" value="20" />
             </div>
 
             <!-- Min Height -->
             <div class="control-item">
               <div class="control-label">
-                <span>Min Block Height [px]</span>
-                <span class="control-val" id="val-min-h">10 px</span>
+                <span>Min Block Height [pt]</span>
+                <span class="control-val" id="val-min-h">0 pt</span>
               </div>
-              <input type="range" id="range-min-h" min="5" max="50" value="10" />
+              <input type="range" id="range-min-h" min="0" max="50" value="0" />
             </div>
 
             <!-- Priority -->
@@ -218,7 +256,20 @@
               </select>
             </div>
 
-            <button id="btn-reanalyze" class="btn secondary-btn w-full">Rielabora XY-Cut</button>
+            <div class="control-item inline-checks">
+              <label class="checkbox-container" title="Usa ordine di lettura, ruoli e artifact del Tagged PDF quando presenti">
+                <input type="checkbox" id="chk-use-tags" checked />
+                <span class="checkmark"></span>
+                Usa Tagged PDF
+              </label>
+              <label class="checkbox-container" title="Ricuci i paragrafi interrotti da cambio colonna, pagina, figure o box">
+                <input type="checkbox" id="chk-stitch" checked />
+                <span class="checkmark"></span>
+                Cuci paragrafi
+              </label>
+            </div>
+
+            <button id="btn-reanalyze" class="btn secondary-btn w-full">Rielabora documento</button>
           </div>
         </section>
 
@@ -231,9 +282,12 @@
                 <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
               </button>
               <div class="export-dropdown glass" id="export-menu">
-                <button data-format="json">Esporta JSON</button>
-                <button data-format="xml">Esporta XML</button>
-                <button data-format="html">Esporta HTML</button>
+                <button data-format="json">Pagina · JSON</button>
+                <button data-format="xml">Pagina · XML</button>
+                <button data-format="html">Pagina · HTML</button>
+                <button data-format="doc-json">Documento · JSON</button>
+                <button data-format="txt">Paragrafi · TXT</button>
+                <button data-format="units">Unità di traduzione · JSON</button>
               </div>
             </div>
           </div>
@@ -247,7 +301,7 @@
           <div class="row-resizer" id="inspector-resizer"></div>
           <h3>Formatting Inspector</h3>
           <div id="inspector-panel" class="inspector-panel">
-            <div class="empty-state">Seleziona un blocco XY-Cut per ispezionarlo.</div>
+            <div class="empty-state">Seleziona un blocco o un paragrafo per ispezionarlo.</div>
           </div>
         </section>
 

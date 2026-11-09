@@ -20,44 +20,45 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
    - Tells you immediately if the PDF is tagged or untagged via a status badge.
    - Visualizes document tags (like `<Document>`, `<Section>`, `<H1>`, `<P>`, `<Table>`) with role-based semantic colors.
 
-3. **Recursive XY-CUT Layout Analysis**:
-   - Analyzes raw character boxes and segments them into coherent visual blocks (columns, paragraphs, headings).
-   - Dynamic parameter sliders: adjust **Row Gap ($T_y$)**, **Column Gap ($T_x$)**, **Minimum Block Width**, **Minimum Block Height**, and **Priority Direction** (Horizontal First, Vertical First, or Largest Gap First).
-   - Live visual overlays:
-     - **Word Bounding Boxes** (translucent cyan outline).
-     - **Decomposed Blocks** (color-coded by recursion levels).
-     - **Math Projection Histograms** (density graph curves rendered on the bottom and right margins).
-     - **Valid Split Cuts** (dotted partition lines showing where cuts occurred).
+3. **Layout Analysis (Rust engine)**:
+   - Text runs are rebuilt into lines (gap-aware word joining, drop caps), then segmented with a **recursive XY-Cut** that never loses text (conservation invariant, centred titles across gutters, figures and boxes as obstacles).
+   - Parameters: automatic thresholds (4 strategies) or manual **Row Gap ($T_y$)**, **Column Gap ($T_x$)**, **Min Block Width/Height** in points, plus **Priority** (rows first, columns first, largest gap).
+   - Bordered boxes and ruled tables are detected from the vector graphics (CTM-aware, pdf.js 6 path format).
+   - Live overlays: text runs, blocks coloured by role, projection histograms and gaps.
 
-4. **Bi-directional Synced Interlock**:
-   - Hovering over a block on the PDF canvas highlights the corresponding node in the layout DOM tree.
-   - Hovering over a list item in the DOM tree highlights its bounding box on the canvas.
-   - Clicking a canvas element or DOM list item loads its properties into the Formatting Inspector.
+4. **Roles & Reading Flow**:
+   - Every block gets a role: `body`, `heading`, `header`, `footer`, `page-number`, `caption`, `footnote`, `sidebar`, `table`, `figure-text`. Running heads and folios are confirmed by their repetition across pages.
+   - Reading order is a topological sort (Breuel) that is robust to figures and full-width elements; Tagged PDFs use their structure tree and `/Artifact` marks.
+   - Blocks are split into paragraphs (leading, indents, hanging indents, short last lines, bullets, size/weight changes) and paragraphs interrupted by **column, page, box or figure breaks are stitched** back together, with de-hyphenation.
+   - The **Paragrafi** tab lists the logical paragraphs; the **Flow** overlay shows reading-order badges and continuation arrows (`↪ p.N` / `↩ p.N`).
 
-5. **Formatting Inspector**:
-   - Extracts font family, average size, bold/italic style flags, precise coordinate metrics, and margins.
-   - Evaluates block alignment (Left, Right, Center, Justified) based on horizontal baseline offsets.
-   - Copies block text to your clipboard with a single click.
+5. **Translation Overlay**:
+   - Each logical paragraph is a translation unit (export: *Unità di traduzione · JSON*; import the same file with the `translation` fields filled, or `{ "par12": "…" }`).
+   - The translated text is re-distributed over the original pieces of the paragraph (proportional to their length, cut at sentence/word boundaries) and fitted into each box. **Pseudo** generates a +30 % pseudo-translation to test the layout without a translation engine.
 
-6. **DOM Layout Export**:
-   - Save the segmented page structure hierarchy as **JSON** structures, clean **XML** schemas, or self-contained styled **HTML** documents with absolute layouts.
+6. **Bi-directional Synced Interlock & Inspector**:
+   - Hovering/clicking a block on the canvas highlights it in the layout DOM tree and vice versa; the inspector shows role, reading order, font, alignment, the block text and the logical paragraphs it belongs to (full stitched text and translation).
+
+7. **Export**:
+   - Page layout tree as **JSON**, **XML** or **HTML**; whole document result as JSON; logical paragraphs as text; translation units as JSON.
 
 ---
 
-## 📐 How the XY-Cut Algorithm Works
+## 📐 How the Pipeline Works
 
-The app implements a custom, resolution-independent **Recursive XY-Cut** algorithm in `src/xycut.js`:
+```
+runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► paragraphs ─► stitching ─► translation units
+```
 
-1. **Interval-Based Projection**:
-   Instead of using pixel bins, the algorithm projects the horizontal $[x_0, x_1]$ or vertical $[y_0, y_1]$ span of each text fragment onto the coordinate axes.
-2. **Interval Merge (Interval Union)**:
-   All overlapping coordinate intervals are sorted and merged into disjoint occupied intervals.
-3. **Gap Detection**:
-   The unoccupied spaces between these merged intervals are the "valleys" or "white-space gaps". Gaps larger than the thresholds ($T_x$ or $T_y$) are candidates for cuts.
-4. **Recursive Slicing**:
-   The block is split along the valid gaps into multiple sub-blocks, which are recursively partitioned. If no gaps exceed the threshold or the block is smaller than the minimum dimensions, it is finalized as a **Leaf Node**.
-5. **Text Reordering**:
-   Fragments in leaf nodes are clustered into rows using a baseline tolerance threshold of `5px` to reassemble natural reading order from top-to-bottom and left-to-right.
+1. **Extraction** (`src/extract.js`, pdf.js): run boxes in PDF points (rotation-aware), real font names, Tagged-PDF marked content and structure roles, vector rectangles and images.
+2. **Lines** (`lines.rs`): runs swept left→right into lines; wide gaps split columns; drop caps merged.
+3. **XY-Cut** (`xycut.rs`): recursive cuts over lines, every line assigned to exactly one leaf.
+4. **Roles** (`roles.rs`): tags/artifacts, margins, page-number and caption patterns, image adjacency, footnote markers, repetition across pages.
+5. **Reading order** (`order.rs`): Breuel topological order, XY-Cut order as tie-break.
+6. **Paragraphs & stitching** (`flow.rs`): paragraph split inside blocks, continuation across blocks/pages, de-hyphenation.
+7. **Re-flow** (`reflow.rs`): translated text distributed over the paragraph's segments.
+
+Full details: [`docs/layout-pipeline.md`](docs/layout-pipeline.md).
 
 ---
 
@@ -96,77 +97,54 @@ The compiled binaries will be outputted under:
 
 ## 🔧 Developer Tools
 
-The `tools/` directory and the Rust `src-tauri/src/bin/` directory contain helper utilities for offline development and debugging of the XY-Cut pipeline without launching the full desktop app.
+The `tools/` directory and the Rust `src-tauri/src/bin/` directory contain helper utilities for offline development and debugging of the layout pipeline without launching the full desktop app.
 
-### `tools/extract_page_py.py` — PDF Page Extractor (Python)
+### `tools/extract_page.js` — PDF Extractor (Node.js)
 
-Extracts text elements from a single PDF page using **PyMuPDF** and outputs the JSON format expected by `cli_analyze`.
+Uses the **same extractor as the desktop app** (`src/extract.js`, pdf.js 6), so the output is identical to what the app analyses, Tagged-PDF information and graphics included.
 
-**Requirements:** `pip install pymupdf`
+```powershell
+node tools/extract_page.js "C:/path/to/document.pdf" 6      > page6.json   # one page
+node tools/extract_page.js "C:/path/to/document.pdf" all    > doc.json     # whole document
+node tools/extract_page.js "C:/path/to/document.pdf" 10-14  > range.json   # page range
+```
+
+### `tools/extract_page_py.py` — Legacy Page Extractor (Python)
+
+PyMuPDF-based extractor kept for the existing fixtures (no tags, no graphics). `pip install pymupdf`.
 
 ```powershell
 python tools/extract_page_py.py "C:/path/to/document.pdf" <pageNum> > page.json
 ```
 
-Output JSON contains `items`, `pageBounds`, and `borderedBoxes` fields ready for piping into `cli_analyze`.
-
-> **Recommended extractor.** Works reliably with Node.js 22+ without any native canvas dependency.
-
 ---
 
-### `tools/extract_page.js` — PDF Page Extractor (Node.js)
+### `src-tauri/src/bin/cli_analyze.rs` — Headless Analyzer (Rust)
 
-Alternative extractor that uses the same **pdf.js** engine as the desktop app, producing coordinate-identical output.
+Runs the same pipeline as the app on a page or a whole document.
 
-```powershell
-node tools/extract_page.js "C:/path/to/document.pdf" <pageNum> > page.json
-```
-
-> **Note:** Requires a Node.js build with native `DOMMatrix` support (canvas package or Node ≤ 18). With Node.js 22+ it may fail with `DOMMatrix is not defined` — use the Python extractor instead.
-
----
-
-### `src-tauri/src/bin/cli_analyze.rs` — XY-Cut CLI Analyzer (Rust)
-
-A command-line interface to the same Rust XY-Cut engine used by the desktop app. Reads a JSON page description from a file or stdin and writes the full layout tree to stdout. Useful for batch analysis, regression testing, and strategy comparison without opening the GUI.
-
-**Build:**
 ```powershell
 cd src-tauri
 cargo build --bin cli_analyze
-# binary: src-tauri/target/debug/cli_analyze.exe
+
+# logical paragraphs in reading order, with roles and joins
+target/debug/cli_analyze --text ../doc.json
+
+# full JSON result, columns first
+target/debug/cli_analyze --priority X ../doc.json > result.json
 ```
 
-**Usage:**
+See [`docs/cli-analyze.md`](docs/cli-analyze.md) for flags and the input/output schema.
+
+---
+
+### Tests
+
 ```powershell
-# From file
-src-tauri/target/debug/cli_analyze page.json
-
-# From stdin (pipe from extractor)
-python tools/extract_page_py.py "doc.pdf" 6 | src-tauri/target/debug/cli_analyze
-
-# Specify a strategy
-$input = Get-Content page.json -Raw | ConvertFrom-Json
-$input | Add-Member -NotePropertyName strategy -NotePropertyValue "zero-run" -Force
-$input | ConvertTo-Json -Depth 20 -Compress | src-tauri/target/debug/cli_analyze
+npm test        # = cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-**Available strategies:** `combined` (default), `delta-x`, `zero-run`, `dominant-font`.
-
-Full pipeline — extract page 6 and analyze with all strategies:
-```powershell
-python tools/extract_page_py.py "C:/path/to/document.pdf" 6 > page6.json
-
-foreach ($s in @("combined", "delta-x", "zero-run", "dominant-font")) {
-    $inp = Get-Content page6.json -Raw | ConvertFrom-Json
-    $inp | Add-Member -NotePropertyName strategy -NotePropertyValue $s -Force
-    $inp | ConvertTo-Json -Depth 20 -Compress |
-        src-tauri/target/debug/cli_analyze > "result_$s.json"
-    Write-Host "[$s] root children: $((Get-Content result_$s.json | ConvertFrom-Json).root.children.Count)"
-}
-```
-
-See [`docs/cli-analyze.md`](docs/cli-analyze.md) for the full input/output schema reference.
+Regression fixtures live in `src-tauri/tests/fixtures/`; `src-tauri/tests/pipeline.rs` checks text conservation for every strategy/priority, drop caps, run-in heads, hanging indents, hyphenation, stitching across columns and pages, running heads and the Tagged-PDF path.
 
 ---
 
