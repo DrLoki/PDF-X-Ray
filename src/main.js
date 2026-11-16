@@ -149,7 +149,24 @@ function cacheElements() {
   for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
 
+function setupCollapsibleConfig() {
+  const toggle = document.getElementById('config-toggle');
+  const section = toggle?.closest('.config-section');
+  if (!toggle || !section) return;
+  const apply = (collapsed) => {
+    section.classList.toggle('collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    try { localStorage.setItem('configCollapsed', collapsed ? '1' : '0'); } catch {}
+  };
+  try { apply(localStorage.getItem('configCollapsed') === '1'); } catch {}
+  toggle.addEventListener('click', () => apply(!section.classList.contains('collapsed')));
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle.click(); }
+  });
+}
+
 function registerEvents() {
+  setupCollapsibleConfig();
   el.btnOpen.addEventListener('click', () => el.fileSelector.click());
   el.fileSelector.addEventListener('change', (e) => e.target.files?.[0] && loadPDFFile(e.target.files[0]));
 

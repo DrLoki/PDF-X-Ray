@@ -89,13 +89,24 @@ Thresholds (`AnalysisOptions.strategy`, overridden by `manual`):
 
 | Strategy | `T_x` | `T_y` |
 |---|---|---|
-| `combined` (default) | max(delta-x valley, 1 em) | max(1 em, 4 pt) |
-| `delta-x` | valley between word-spacing and gutter peaks of the run-gap histogram | max(1 em, 4 pt) |
+| `combined` (default) | max(delta-x valley, 1 em) | leading-relative (below) |
+| `delta-x` | valley between word-spacing and gutter peaks of the run-gap histogram | leading-relative (below) |
 | `zero-run` | 10 pt | 5 pt |
 | `dominant-font` | 1 em | 1 em |
 
+**Leading-relative `T_y`**: 3.5 × the median gap between consecutive lines of
+the block, clamped to [max(4 pt, ½ em), 1 em] (1 em when the block has fewer
+than 5 line gaps). Section spacing and the space above headings is usually
+2–4× the normal line gap but often below 1 em (e.g. 7–9 pt with 9.5 pt type).
+
 `priority` (`Y` rows first, `X` columns first, `max-gap`) decides which
-direction is tried first.
+direction is tried first. When the global X gaps only isolate thin groups (a
+vertical credit in the margin, a folio) and collapse on partition, the
+per-row column vote is tried as well.
+
+**Background images.** An image with at least 3 lines printed over it,
+covering ≥ 10 % of its area, is decorative artwork, not an obstacle: it would
+otherwise hide the column gutter it spans.
 
 **Boxes.** Rectangles are cleaned (page frames, rules, duplicates removed);
 groups of ≥ 3 touching rectangles become one **table**. Each line goes to the

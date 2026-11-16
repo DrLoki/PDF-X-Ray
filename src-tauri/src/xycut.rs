@@ -124,11 +124,31 @@ impl<'a> Ctx<'a> {
         let min_w = 1.5 * dom;
         let min_h = 0.0;
         match self.opts.strategy.as_str() {
-            "delta-x" => (self.delta_x_gutter(idxs, dom).max(0.8 * dom), dom.max(4.0), min_w, min_h),
+            "delta-x" => (self.delta_x_gutter(idxs, dom).max(0.8 * dom), self.leading_threshold(idxs, dom), min_w, min_h),
             "zero-run" => (10.0, 5.0, min_w, min_h),
             "dominant-font" => (dom, dom, min_w, min_h),
-            _ => (self.delta_x_gutter(idxs, dom).max(dom), dom.max(4.0), min_w, min_h),
+            _ => (self.delta_x_gutter(idxs, dom).max(dom), self.leading_threshold(idxs, dom), min_w, min_h),
         }
+    }
+
+    /// Vertical threshold relative to the block's own line spacing: a gap is
+    /// a cut candidate when it is clearly larger than the typical gap between
+    /// consecutive lines (section spacing, space above headings). Bounded to
+    /// [max(4 pt, ½ em), 1 em]; 1 em when there are too few gaps to measure.
+    fn leading_threshold(&self, idxs: &[usize], dom: f32) -> f32 {
+        let upper = dom.max(4.0);
+        let boxes: Vec<Bounds> = idxs.iter().map(|&i| self.lines[i].b).collect();
+        let mut gaps: Vec<f32> = projection_gaps(&boxes, false, None)
+            .into_iter()
+            .map(|g| g.size)
+            .filter(|&s| s < 1.5 * dom)
+            .collect();
+        if gaps.len() < 5 {
+            return upper;
+        }
+        gaps.sort_by(|a, b| a.total_cmp(b));
+        let median = gaps[gaps.len() / 2];
+        (LEADING_FACTOR * median).clamp((0.5 * dom).max(4.0), upper)
     }
 
     /// Strategy 1 (delta-x histogram): collect horizontal distances between
@@ -358,6 +378,12 @@ impl<'a> Ctx<'a> {
         } else {
             self.per_row_plan(&idxs, tx, dom)
         };
+        // When the global gaps only isolate thin groups (a margin credit, a
+        // folio), they collapse on partition: the per-row vote is the fallback.
+        let x_fallback = match &x_plan {
+            Some(p) if p.kind == "gaps" && self.partition(&idxs, p, min_w).len() < 2 => self.per_row_plan(&idxs, tx, dom),
+            _ => None,
+        };
         let y_plan = if !yg.is_empty() {
             Some(Plan {
                 axis: Axis::Y,
@@ -373,13 +399,14 @@ impl<'a> Ctx<'a> {
         diag.y_gaps = yg;
 
         let plans: Vec<Plan> = match self.opts.priority.as_str() {
-            "X" => [x_plan, y_plan].into_iter().flatten().collect(),
+            "X" => [x_plan, x_fallback, y_plan].into_iter().flatten().collect(),
             "max-gap" => {
                 let mut v: Vec<Plan> = [x_plan, y_plan].into_iter().flatten().collect();
                 v.sort_by(|a, b| b.strength.total_cmp(&a.strength));
+                v.extend(x_fallback);
                 v
             }
-            _ => [y_plan, x_plan].into_iter().flatten().collect(),
+            _ => [y_plan, x_plan, x_fallback].into_iter().flatten().collect(),
         };
 
         for plan in plans {
@@ -592,6 +619,20 @@ fn walk_order(node: &mut LayoutNode, order: &mut Vec<String>) {
     }
 }
 
+/// Gap between consecutive lines × this factor = vertical cut threshold.
+const LEADING_FACTOR: f32 = 3.5;
+
+/// An image with running text printed over it (decorative artwork behind the
+/// columns) is a background, not a figure: it must not hide the gutters.
+fn is_background(img: &Bounds, lines: &[Line]) -> bool {
+    let inside: Vec<&Line> = lines.iter().filter(|l| img.contains_point(l.b.cx(), l.b.cy())).collect();
+    if inside.len() < 3 {
+        return false;
+    }
+    let covered: f32 = inside.iter().map(|l| l.b.area()).sum();
+    covered >= img.area().max(1.0) * 0.1
+}
+
 pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[Bounds], images: &[Bounds], opts: &AnalysisOptions) -> PageLayout {
     let mut ctx = Ctx { lines, obstacles: Vec::new(), opts, page_num, counter: 0, leaves: HashMap::new(), box_kind: None, box_id: None };
 
@@ -648,7 +689,7 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
     // ---- body: images and the boxes kept above are obstacles for the cuts
     ctx.obstacles = images
         .iter()
-        .filter(|b| b.area() < page_bounds.area() * 0.8)
+        .filter(|b| b.area() < page_bounds.area() * 0.8 && !is_background(b, lines))
         .copied()
         .chain(box_nodes.iter().map(|n| n.bounds))
         .collect();

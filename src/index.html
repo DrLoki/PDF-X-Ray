@@ -91,7 +91,7 @@
           <!-- Page Navigation -->
           <div class="toolbar-group nav-group">
             <button id="btn-prev-page" class="icon-btn" title="Pagina precedente">
-              <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 14-1.41L15.41 7.41z"/></svg>
+              <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
             </button>
             <div class="page-counter">
               <input type="number" id="input-page-num" min="1" value="1" />
@@ -192,8 +192,11 @@
         
         <!-- Section A: XY-Cut Config -->
         <section class="config-section">
-          <h3>Layout Engine</h3>
-          <div class="control-grid">
+          <h3 id="config-toggle" class="collapsible-title" role="button" tabindex="0" aria-expanded="true" title="Mostra/nascondi">
+            <span>Layout Engine</span>
+            <svg class="collapse-chevron" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+          </h3>
+          <div class="control-grid" id="config-body">
             
             <!-- Auto-Detect Gutters -->
             <div class="control-item">

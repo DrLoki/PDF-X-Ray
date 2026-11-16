@@ -36,8 +36,9 @@ Il vecchio modulo `gutter_detection.rs` è stato sostituito da una pipeline a mo
 - Sillabazione a fine riga ricomposta: `tradu-` + `zione` → `traduzione`. Se il documento usa i soft hyphen per gli a capo, un `-` a fine riga è un composto reale e viene mantenuto (`storm-blasted`, `high-stakes`).
 
 ### 4. Segmentazione più robusta
-- Fallback per colonne con elementi a cavallo del gutter: le righe che attraversano la linea di separazione vengono isolate con tagli orizzontali.
-- Immagini e box fanno da ostacoli nelle proiezioni, quindi un taglio non può più attraversare una figura.
+- Fallback per colonne con elementi a cavallo del gutter: le righe che attraversano la linea di separazione vengono isolate con tagli orizzontali. Il fallback viene tentato anche quando i gap globali isolano solo elementi sottili, come un credito verticale a margine.
+- Immagini e box fanno da ostacoli nelle proiezioni, quindi un taglio non può più attraversare una figura. Le immagini di sfondo con testo stampato sopra non sono ostacoli, così non nascondono il gutter tra le colonne.
+- La soglia verticale automatica dipende dall'interlinea del blocco (3.5 × lo spazio mediano tra le righe, fra ½ e 1 em) invece di valere sempre 1 em: gli stacchi di sezione e lo spazio sopra i titoli vengono separati.
 - I box bordati vengono riconosciuti di nuovo. Con pdf.js 6 il rilevamento dei rettangoli non funzionava più, perché il formato dei tracciati di `constructPath` è cambiato. Ora tiene conto della matrice di trasformazione (CTM) e dei form XObject.
 - Le griglie di rettangoli adiacenti diventano un'unica tabella. Una campitura dietro una singola riga (ad esempio un titolo evidenziato) non viene trattata come box.
 

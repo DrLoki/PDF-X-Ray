@@ -707,6 +707,17 @@ body, html {
   flex-shrink: 0;
 }
 
+.collapsible-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+.collapse-chevron { transition: transform 0.15s ease; }
+.config-section.collapsed .collapse-chevron { transform: rotate(-90deg); }
+.config-section.collapsed .control-grid { display: none; }
+
 .control-grid {
   display: flex;
   flex-direction: column;
