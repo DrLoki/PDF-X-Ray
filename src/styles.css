@@ -1204,3 +1204,135 @@ input[type=range]::-webkit-slider-thumb:hover {
   font-size: 0.72rem;
   text-align: left;
 }
+
+/* Analysis progress card (floats over the document workspace) */
+.progress-panel {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(520px, calc(100% - 32px));
+  z-index: 90;
+  padding: 10px 14px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(6, 12, 24, 0.92);
+  border: 1px solid var(--border-active);
+  box-shadow: var(--shadow-premium);
+  backdrop-filter: blur(8px);
+  transition: opacity 0.4s ease;
+}
+.progress-panel[hidden] { display: none; }
+.progress-panel.done { opacity: 0; }
+
+.progress-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 0.75rem;
+}
+.progress-phase { font-weight: 600; color: var(--color-text); white-space: nowrap; }
+.progress-detail {
+  flex: 1;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.progress-eta { color: var(--accent); font-family: var(--font-mono); white-space: nowrap; }
+
+.progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #0891b2, var(--accent));
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.6);
+  transition: width 0.25s ease;
+}
+/* the running phase has no measurable progress: animate a sheen on the bar */
+.progress-panel.busy .progress-bar {
+  background-image: linear-gradient(90deg, #0891b2, var(--accent)),
+    linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.55) 50%, transparent 100%);
+  background-size: 100% 100%, 40% 100%;
+  background-repeat: no-repeat;
+  background-blend-mode: screen;
+  animation: progress-sheen 1.2s linear infinite;
+}
+@keyframes progress-sheen {
+  from { background-position: 0 0, -40% 0; }
+  to { background-position: 0 0, 140% 0; }
+}
+
+/* Snapshot */
+.engine-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.snapshot-dialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 20px 22px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-active);
+  background: #07101e;
+  color: var(--color-text);
+  box-shadow: var(--shadow-premium);
+}
+.snapshot-dialog::backdrop { background: rgba(2, 6, 14, 0.7); backdrop-filter: blur(3px); }
+.snapshot-dialog h3 { font-family: var(--font-title); margin: 0 0 8px; }
+.snap-help { font-size: 0.78rem; color: var(--color-text-muted); line-height: 1.5; margin: 0 0 10px; }
+.snap-help code { font-family: var(--font-mono); color: var(--accent); }
+.snap-settings {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--bg-card);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.snap-verdict {
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px 10px;
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+}
+.snap-verdict legend { font-size: 0.72rem; color: var(--color-text-muted); padding: 0 4px; }
+.snap-verdict label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.snap-note-label { font-size: 0.72rem; color: var(--color-text-muted); display: block; margin-bottom: 4px; }
+#snap-note {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--bg-control);
+  color: var(--color-text);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  font: 0.8rem var(--font-sans);
+  margin-bottom: 8px;
+}
+.snap-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
+.auto-hint {
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--color-text-dim);
+  border-left: 2px solid var(--border-active);
+  padding: 2px 0 2px 8px;
+}
+.auto-hint[hidden] { display: none; }

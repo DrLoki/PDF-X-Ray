@@ -22,6 +22,7 @@ const roleColor = (r) => ROLE_COLORS[r] || '#34d399';
 
 const state = {
   pdfDoc: null,
+  loadingTask: null,         // pdf.js loading task: the handle used to release the document
   fileName: null,
   pageNum: 1,
   totalPageCount: 1,
@@ -72,6 +73,54 @@ function applyAutoGutterUIState() {
   el.rangeMinW.disabled = autoOn;
   el.rangeMinH.disabled = autoOn;
   el.selectAutoStrategy.disabled = !autoOn;
+  el.autoHint.hidden = !autoOn;
+  syncAutoSliders();
+}
+
+const SLIDERS = () => [
+  { key: 'thresholdY', range: el.rangeY, label: el.valY, diag: 'thresholdY' },
+  { key: 'thresholdX', range: el.rangeX, label: el.valX, diag: 'thresholdX' },
+  { key: 'minWidth', range: el.rangeMinW, label: el.valMinW, diag: 'minWidth' },
+  { key: 'minHeight', range: el.rangeMinH, label: el.valMinH, diag: 'minHeight' },
+];
+
+const fmtPt = (v) => (Number.isInteger(v) ? v : v.toFixed(1)) + ' pt';
+const round1 = (v) => Math.round(v * 10) / 10;
+
+/** Diagnostics of the first automatic cut decision of the page (root level). */
+function pageAutoDiag(pr) {
+  if (!pr) return null;
+  const queue = [pr.root];
+  while (queue.length) {
+    const n = queue.shift();
+    if (n.diag && n.diag.source && n.diag.source.startsWith('auto')) return n.diag;
+    queue.push(...(n.children || []));
+  }
+  return null;
+}
+
+/**
+ * In automatic mode the (disabled) sliders show the thresholds the engine
+ * really used on the current page. They also become the starting point when
+ * switching back to manual.
+ */
+function syncAutoSliders() {
+  if (!el.chkAutoGutter.checked) return;
+  const autoResult = state.docOptions && !state.docOptions.manual;
+  const d = autoResult ? pageAutoDiag(currentPageResult()) : null;
+  if (!d) {
+    el.autoHint.textContent = state.doc ? 'Soglie automatiche: in attesa della nuova analisi…' : 'Le soglie automatiche compariranno dopo l\'analisi.';
+    return;
+  }
+  for (const s of SLIDERS()) {
+    const v = round1(d[s.diag]);
+    state[s.key] = v;
+    s.range.value = Math.round(Math.min(Number(s.range.max), Math.max(Number(s.range.min), v)));
+    s.label.textContent = fmtPt(v);
+  }
+  el.autoHint.textContent = `Soglie calcolate dal motore (${d.source.replace('auto:', '')}) per la pagina ${state.pageNum}, ` +
+    `primo livello: corpo dominante ${round1(d.dominantFont)} pt, gap massimi X ${round1(d.largestXGap)} / Y ${round1(d.largestYGap)} pt. ` +
+    `I blocchi interni ricalcolano le soglie sul proprio corpo: seleziona un blocco per vederle.`;
 }
 
 function cacheElements() {
@@ -92,6 +141,10 @@ function cacheElements() {
     rangeMinW: 'range-min-w', valMinW: 'val-min-w', rangeMinH: 'range-min-h', valMinH: 'val-min-h',
     selectPriority: 'select-priority', btnReanalyze: 'btn-reanalyze',
     domTreeContainer: 'dom-tree-container', inspectorPanel: 'inspector-panel', btnExport: 'btn-export', exportMenu: 'export-menu',
+    progressPanel: 'progress-panel', progressPhase: 'progress-phase', progressDetail: 'progress-detail',
+    progressEta: 'progress-eta', progressBar: 'progress-bar',
+    btnSnapshot: 'btn-snapshot', snapshotDialog: 'snapshot-dialog', snapPage: 'snap-page', snapSettings: 'snap-settings',
+    snapNote: 'snap-note', snapPng: 'snap-png', autoHint: 'auto-hint',
   };
   for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
@@ -129,6 +182,10 @@ function registerEvents() {
   el.chkUseTags.addEventListener('change', runAnalysis);
   el.chkStitch.addEventListener('change', runAnalysis);
   el.btnReanalyze.addEventListener('click', runAnalysis);
+  el.btnSnapshot.addEventListener('click', openSnapshotDialog);
+  el.snapshotDialog.addEventListener('close', () => {
+    if (el.snapshotDialog.returnValue === 'save') saveSnapshot();
+  });
 
   el.btnPseudo.addEventListener('click', applyPseudoTranslation);
   el.btnImportTr.addEventListener('click', () => el.trFileSelector.click());
@@ -148,7 +205,7 @@ function registerEvents() {
 }
 
 function setupSlider(rangeInput, valDisplay, key) {
-  const sync = () => { valDisplay.textContent = state[key] + ' pt'; };
+  const sync = () => { valDisplay.textContent = fmtPt(state[key]); };
   rangeInput.value = state[key];
   sync();
   rangeInput.addEventListener('input', (e) => { state[key] = parseInt(e.target.value, 10); sync(); });
@@ -158,6 +215,125 @@ function setupSlider(rangeInput, valDisplay, key) {
 function setStatus(text, kind = '') {
   el.analysisStatus.textContent = text;
   el.analysisStatus.className = 'analysis-status' + (kind ? ' ' + kind : '');
+}
+
+// --------------------------------------------------------------------------
+// Progress card: preparation -> page extraction -> layout analysis
+// --------------------------------------------------------------------------
+
+// Share of the bar given to each phase of a full document load.
+const PHASE_WEIGHT = { prepare: 0.04, extract: 0.86, analyze: 0.10 };
+
+const progress = {
+  start: 0,            // start of the whole run (ms)
+  phaseStart: 0,
+  extractRate: null,   // smoothed ms per extracted page
+  analyzeMsPerPage: 6, // learnt from previous analyses in this session
+  analyzeOverhead: 250,
+  timer: null,
+  hideTimer: null,
+};
+
+function formatDuration(ms) {
+  if (!isFinite(ms) || ms < 0) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 1) return 'meno di 1 s';
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  return `${m} min ${String(s % 60).padStart(2, '0')} s`;
+}
+
+function estimateAnalysisMs(pages) {
+  return progress.analyzeOverhead + pages * progress.analyzeMsPerPage;
+}
+
+function paintProgress(phase, detail, fraction, eta, busy = false) {
+  clearTimeout(progress.hideTimer);
+  const pct = Math.max(0, Math.min(100, fraction * 100));
+  el.progressPanel.hidden = false;
+  el.progressPanel.classList.remove('done');
+  el.progressPanel.classList.toggle('busy', busy);
+  el.progressPanel.setAttribute('aria-valuenow', String(Math.round(pct)));
+  el.progressPhase.textContent = phase;
+  el.progressDetail.textContent = detail;
+  el.progressEta.textContent = eta;
+  el.progressBar.style.width = pct.toFixed(1) + '%';
+  el.progressBar.style.background = '';
+}
+
+function progressBegin() {
+  stopAnalysisTicker();
+  progress.start = progress.phaseStart = performance.now();
+  progress.extractRate = null;
+  paintProgress('Preparazione', 'apertura documento…', 0, '', true);
+}
+
+function progressPrepare(done, total) {
+  const f = total ? done / total : 1;
+  paintProgress('Preparazione', `indice pagine ${done}/${total}`, PHASE_WEIGHT.prepare * f, '', true);
+}
+
+function progressExtract(done, total, pageNum) {
+  const now = performance.now();
+  if (done === 0) {
+    progress.phaseStart = now;
+    paintProgress('Estrazione', `pagina ${pageNum} · 0/${total}`, PHASE_WEIGHT.prepare, 'stima in corso…', true);
+    return;
+  }
+  // per-page time: overall average, smoothed so that one slow page does not make the ETA jump
+  const avg = (now - progress.phaseStart) / done;
+  progress.extractRate = progress.extractRate === null ? avg : progress.extractRate * 0.7 + avg * 0.3;
+  const remaining = (total - done) * progress.extractRate + estimateAnalysisMs(total);
+  const f = PHASE_WEIGHT.prepare + PHASE_WEIGHT.extract * (done / total);
+  const eta = done < Math.min(3, total) ? 'stima in corso…' : `~${formatDuration(remaining)} rimanenti`;
+  paintProgress('Estrazione', `pagina ${pageNum} · ${done}/${total}`, f, eta);
+}
+
+/** Layout analysis is a single Rust call: show an estimate and the elapsed time. */
+function progressAnalyze(pages, fullRun) {
+  stopAnalysisTicker();
+  if (!fullRun) progress.start = performance.now();
+  const t0 = performance.now();
+  const estimate = estimateAnalysisMs(pages);
+  const base = fullRun ? PHASE_WEIGHT.prepare + PHASE_WEIGHT.extract : 0;
+  const span = fullRun ? PHASE_WEIGHT.analyze : 1;
+  const tick = () => {
+    const elapsed = performance.now() - t0;
+    // approach the end of the phase asymptotically (63% at the estimate, 86% at twice it):
+    // the bar keeps moving if the estimate is optimistic and never claims 100% before the result
+    const f = base + span * 0.97 * (1 - Math.exp(-elapsed / estimate));
+    const left = estimate - elapsed;
+    const eta = left > 500 ? `~${formatDuration(left)} rimanenti` : 'quasi finito…';
+    paintProgress('Analisi del layout', `${pages} pagine · ${formatDuration(elapsed) || '0 s'}`, f, eta, true);
+  };
+  tick();
+  progress.timer = setInterval(tick, 250);
+  return t0;
+}
+
+function stopAnalysisTicker() {
+  if (progress.timer) clearInterval(progress.timer);
+  progress.timer = null;
+}
+
+function progressDone(pages, analysisStart, summary) {
+  stopAnalysisTicker();
+  // learn the analysis speed for the next estimates
+  const ms = performance.now() - analysisStart;
+  if (pages > 0) progress.analyzeMsPerPage = Math.max(0.5, (ms - progress.analyzeOverhead) / pages);
+  const total = performance.now() - progress.start;
+  paintProgress('Completato', summary, 1, `in ${formatDuration(total)}`);
+  progress.hideTimer = setTimeout(() => {
+    el.progressPanel.classList.add('done');
+    progress.hideTimer = setTimeout(() => { el.progressPanel.hidden = true; }, 450);
+  }, 2500);
+}
+
+function progressFail(message) {
+  stopAnalysisTicker();
+  paintProgress('Errore', message, 1, '');
+  el.progressBar.style.background = 'var(--accent-red)';
+  progress.hideTimer = setTimeout(() => { el.progressPanel.hidden = true; }, 6000);
 }
 
 // --------------------------------------------------------------------------
@@ -179,10 +355,18 @@ function setupDragAndDrop() {
 async function loadPDFFile(file) {
   const token = ++state.loadToken;
   showLoading(true);
+  progressBegin();
   try {
     const data = await file.arrayBuffer();
-    if (state.pdfDoc) state.pdfDoc.destroy();
-    state.pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+    // pdf.js 6: only the loading task can be destroyed (PDFDocumentProxy.destroy was removed).
+    // Open the new document first, then release the old one, so a failed open keeps the current file.
+    const task = pdfjsLib.getDocument({ data });
+    const doc = await task.promise;
+    if (token !== state.loadToken) { task.destroy(); return; }
+    const oldTask = state.loadingTask;
+    state.loadingTask = task;
+    state.pdfDoc = doc;
+    if (oldTask) oldTask.destroy().catch(err => console.warn('Error releasing previous PDF:', err));
     state.fileName = file.name;
     state.totalPageCount = state.pdfDoc.numPages;
     state.pageNum = 1;
@@ -199,13 +383,15 @@ async function loadPDFFile(file) {
     el.inputPageNum.value = 1;
     el.inputPageNum.max = state.totalPageCount;
 
-    await buildPageRefMap();
+    await buildPageRefMap(token);
+    if (token !== state.loadToken) return;
     await loadBookmarks();
     await renderPage(1);
     showLoading(false);
     await extractDocument(token);
   } catch (err) {
     console.error('Error loading PDF file:', err);
+    if (token === state.loadToken) progressFail(err.message);
     alert('Errore nel caricamento del file PDF: ' + err.message);
   } finally {
     showLoading(false);
@@ -218,6 +404,7 @@ async function extractDocument(token) {
   // current page first so that its overlay can be drawn immediately
   const order = [state.pageNum, ...Array.from({ length: n }, (_, i) => i + 1).filter(p => p !== state.pageNum)];
   let done = 0;
+  progressExtract(0, n, order[0]);
   for (const p of order) {
     if (token !== state.loadToken) return;
     if (!state.pageData.has(p)) {
@@ -231,16 +418,20 @@ async function extractDocument(token) {
     }
     done++;
     if (done === 1) drawOverlay();
+    progressExtract(done, n, p);
     if (done % 5 === 0 || done === n) setStatus(`Estrazione ${done}/${n}…`);
   }
   if (token !== state.loadToken) return;
   state.extractionDone = true;
-  await runAnalysis();
+  await runAnalysis(true);
 }
 
-async function buildPageRefMap() {
+async function buildPageRefMap(token) {
   state.pageRefMap.clear();
-  for (let i = 1; i <= state.totalPageCount; i++) {
+  const n = state.totalPageCount;
+  for (let i = 1; i <= n; i++) {
+    if (token !== state.loadToken) return;
+    if (i === 1 || i % 10 === 0 || i === n) progressPrepare(i, n);
     try {
       const page = await state.pdfDoc.getPage(i);
       if (page.ref) state.pageRefMap.set(page.ref.num + '_' + page.ref.gen, i);
@@ -276,21 +467,25 @@ function analysisOptions() {
   return opts;
 }
 
-async function runAnalysis() {
+/** `fullRun`: first analysis after loading, the bar continues from the extraction phase. */
+async function runAnalysis(fullRun = false) {
   if (!state.pdfDoc) return;
   if (!isTauri()) {
     setStatus('Motore di analisi disponibile solo nell\'app desktop.', 'warn');
+    if (fullRun === true) progressFail('motore di analisi disponibile solo nell\'app desktop');
     return;
   }
   if (!state.extractionDone) return; // analysis starts automatically when extraction ends
   const token = state.loadToken;
   const pages = Array.from({ length: state.totalPageCount }, (_, i) => state.pageData.get(i + 1)).filter(Boolean);
   setStatus('Analisi in corso…');
-  const t0 = performance.now();
+  const t0 = progressAnalyze(pages.length, fullRun === true);
   try {
-    const doc = await window.__TAURI__.core.invoke('analyze_document', { pages, options: analysisOptions() });
+    const options = analysisOptions();
+    const doc = await window.__TAURI__.core.invoke('analyze_document', { pages, options });
     if (token !== state.loadToken) return;
     state.doc = doc;
+    state.docOptions = options;
     state.pageResults = new Map(doc.pages.map(p => [p.pageNum, p]));
     state.paraById = new Map(doc.paragraphs.map(p => [p.id, p]));
     if (!state.paraById.has(state.selectedParaId)) state.selectedParaId = null;
@@ -298,11 +493,13 @@ async function runAnalysis() {
     const s = doc.stats;
     const lost = s.inputChars - s.outputChars;
     setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : ''), lost ? 'warn' : 'ok');
+    progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
     await recomputePieces();
     refreshPageUI();
   } catch (err) {
     console.error('Analysis failed:', err);
     setStatus('Analisi fallita: ' + err, 'warn');
+    if (token === state.loadToken) progressFail('analisi fallita: ' + err);
   }
 }
 
@@ -374,6 +571,7 @@ async function renderPage(num) {
 }
 
 function refreshPageUI() {
+  syncAutoSliders();
   renderLayoutDOMTree();
   renderParagraphList();
   drawOverlay();
@@ -980,6 +1178,22 @@ function populateBlockInspector(block) {
     grid.appendChild(card('Figli', `${block.children ? block.children.length : 0}`, 'span-2'));
     c.appendChild(grid);
   }
+  const d = block.diag;
+  if (d && d.source) {
+    const dg = document.createElement('div');
+    dg.className = 'inspector-grid';
+    dg.style.marginTop = '8px';
+    dg.appendChild(card(`Soglie usate (${d.source})`, `Ty ${fmtPt(round1(d.thresholdY))} · Tx ${fmtPt(round1(d.thresholdX))} · min W ${fmtPt(round1(d.minWidth))} · min H ${fmtPt(round1(d.minHeight))}`, 'span-2'));
+    dg.appendChild(card('Gap massimi', `X ${fmtPt(round1(d.largestXGap))} · Y ${fmtPt(round1(d.largestYGap))} · corpo ${fmtPt(round1(d.dominantFont))}`, 'span-2'));
+    dg.appendChild(card('Decisione', d.decision + (d.tried.length ? ` — ${d.tried.join('; ')}` : ''), 'span-2'));
+    c.appendChild(dg);
+  } else if (d) {
+    const dg = document.createElement('div');
+    dg.className = 'inspector-grid';
+    dg.style.marginTop = '8px';
+    dg.appendChild(card('Decisione', d.decision, 'span-2'));
+    c.appendChild(dg);
+  }
   el.inspectorPanel.appendChild(c);
 }
 
@@ -1194,4 +1408,159 @@ function setupResizableSidebars() {
   drag(ir, 'row-resize', (ev, start) => {
     container.style.setProperty('--inspector-height', clamp(startH - (ev.clientY - start.y), 120, 450) + 'px');
   });
+}
+
+// --------------------------------------------------------------------------
+// Snapshots: settings + page data + manual vs automatic results, for tuning
+// --------------------------------------------------------------------------
+
+const SNAPSHOT_VERSION = 1;
+
+function describeOptions(o) {
+  if (!o) return '—';
+  const base = `priorità ${o.priority} · tag ${o.useTags ? 'sì' : 'no'} · cucitura ${o.stitch ? 'sì' : 'no'}`;
+  if (o.manual) {
+    const m = o.manual;
+    return `MANUALI: Ty ${m.thresholdY} pt · Tx ${m.thresholdX} pt · min W ${m.minWidth} pt · min H ${m.minHeight} pt · ${base}`;
+  }
+  return `AUTOMATICHE (${o.strategy}) · ${base}`;
+}
+
+function openSnapshotDialog() {
+  if (!state.doc || !currentPageResult()) {
+    alert("Nessuna analisi disponibile: carica un PDF e attendi la fine dell'analisi.");
+    return;
+  }
+  el.snapPage.textContent = state.pageNum;
+  el.snapSettings.textContent = describeOptions(state.docOptions);
+  // default verdict follows the mode in use
+  const manual = !!state.docOptions?.manual;
+  el.snapshotDialog.querySelector(`input[name="verdict"][value="${manual ? 'manual-better' : 'reference'}"]`).checked = true;
+  el.snapNote.value = '';
+  el.snapshotDialog.showModal();
+}
+
+function leafSummaries(root) {
+  const out = [];
+  (function walk(n) {
+    if (n.type === 'leaf') {
+      out.push({ id: n.id, bounds: n.bounds, role: n.role || null, readingOrder: n.readingOrder ?? null, text: (n.text || '').slice(0, 160) });
+    }
+    (n.children || []).forEach(walk);
+  })(root);
+  return out;
+}
+
+function pageSummary(doc, pageNum, options) {
+  const pr = doc.pages.find(p => p.pageNum === pageNum);
+  if (!pr) return null;
+  return {
+    options,
+    root: pr.root, // full tree; nodes carry `diag` (thresholds, gaps, decision)
+    leaves: leafSummaries(pr.root),
+    taggedOrder: pr.taggedOrder,
+    paragraphs: doc.paragraphs
+      .filter(p => p.segments.some(s => s.pageNum === pageNum))
+      .map(p => ({
+        id: p.id,
+        role: p.role,
+        text: p.text.slice(0, 300),
+        segments: p.segments.map(s => ({ pageNum: s.pageNum, blockId: s.blockId, bounds: s.bounds })),
+        joins: p.joins,
+      })),
+  };
+}
+
+function viewPng() {
+  try {
+    const c = document.createElement('canvas');
+    c.width = el.pdfCanvas.width;
+    c.height = el.pdfCanvas.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(el.pdfCanvas, 0, 0);
+    ctx.drawImage(el.overlayCanvas, 0, 0);
+    return c.toDataURL('image/png');
+  } catch (err) {
+    console.warn('Snapshot image unavailable:', err);
+    return null;
+  }
+}
+
+async function saveSnapshot() {
+  const pageNum = state.pageNum;
+  const verdict = el.snapshotDialog.querySelector('input[name="verdict"]:checked')?.value || 'reference';
+  const note = el.snapNote.value.trim();
+  const current = state.docOptions;
+  const pages = [pageNum - 1, pageNum, pageNum + 1].map(p => state.pageData.get(p)).filter(Boolean);
+  setStatus('Snapshot: calcolo dei risultati automatici…');
+  try {
+    const invoke = window.__TAURI__.core.invoke;
+    // the same pages analysed in isolation, so the CLI can reproduce every result exactly
+    const autoSameOpts = { ...current };
+    delete autoSameOpts.manual;
+    const autoDefaultOpts = { strategy: 'combined', priority: 'Y', useTags: current.useTags, stitch: current.stitch };
+    const [subCurrent, subAutoSame, subAutoDefault] = await Promise.all([
+      invoke('analyze_document', { pages, options: current }),
+      invoke('analyze_document', { pages, options: autoSameOpts }),
+      invoke('analyze_document', { pages, options: autoDefaultOpts }),
+    ]);
+
+    const curSum = pageSummary(subCurrent, pageNum, current);
+    const autoSum = pageSummary(subAutoSame, pageNum, autoSameOpts);
+    let reference = null;
+    if (verdict === 'manual-better' || verdict === 'reference') reference = { source: 'snapshot-settings', leaves: curSum.leaves };
+    else if (verdict === 'auto-better') reference = { source: 'auto-same-priority', leaves: autoSum.leaves };
+
+    const snapshot = {
+      kind: 'pdf-xray-snapshot',
+      version: SNAPSHOT_VERSION,
+      createdAt: new Date().toISOString(),
+      file: state.fileName,
+      pageNum,
+      pageCount: state.totalPageCount,
+      verdict,
+      note,
+      settings: {
+        options: current,
+        ui: {
+          autoThresholds: el.chkAutoGutter.checked,
+          strategy: el.selectAutoStrategy.value,
+          priority: state.priority,
+          thresholdX: state.thresholdX,
+          thresholdY: state.thresholdY,
+          minWidth: state.minWidth,
+          minHeight: state.minHeight,
+          zoom: state.zoomScale,
+        },
+      },
+      document: { bodyFontSize: state.doc.stats.bodyFontSize, stats: state.doc.stats },
+      // the full-document view the user was looking at (may differ slightly from the isolated pages)
+      displayed: pageSummary(state.doc, pageNum, current),
+      results: {
+        snapshotSettings: curSum,
+        autoSamePriority: autoSum,
+        autoDefault: pageSummary(subAutoDefault, pageNum, autoDefaultOpts),
+      },
+      reference,
+      pages,
+    };
+
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const base = (state.fileName || 'document').replace(/\.pdf$/i, '').slice(0, 40);
+    const stem = `${base}_p${pageNum}_${verdict}_${stamp}`;
+    const json = JSON.stringify(snapshot, null, 1);
+    const png = el.snapPng.checked ? viewPng() : null;
+
+    if (isTauri()) {
+      const path = await invoke('save_snapshot', { fileStem: stem, json, pngBase64: png });
+      setStatus(`Snapshot salvato: ${path}`, 'ok');
+      try { await window.__TAURI__.opener?.revealItemInDir(path); } catch (_) { /* best effort */ }
+    } else {
+      download(json, `${stem}.json`, 'application/json');
+      setStatus('Snapshot scaricato.', 'ok');
+    }
+  } catch (err) {
+    console.error('Snapshot failed:', err);
+    setStatus('Snapshot fallito: ' + err, 'warn');
+  }
 }

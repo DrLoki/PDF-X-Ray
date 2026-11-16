@@ -17,6 +17,7 @@ cargo build --release --bin cli_analyze
 ```
 cli_analyze [--text] [--priority X|Y|max-gap] [--strategy NAME] [--no-tags] [--no-stitch] [FILE]
 cli_analyze --distribute [FILE]
+cli_analyze --eval [--json] SNAPSHOT_OR_DIR...
 ```
 
 `FILE` (or stdin when omitted) contains either
@@ -33,6 +34,7 @@ cli_analyze --distribute [FILE]
 | `--no-tags` | ignore Tagged-PDF information |
 | `--no-stitch` | do not stitch paragraphs across blocks / pages |
 | `--distribute` | input `{ "units": [ { "text", "weights": [..] } ] }`, output the text split per segment (same as the `distribute_translations` command) |
+| `--eval` | score snapshots (files or folders) against their reference segmentation, see below; `--json` for machine-readable output |
 
 ## Typical pipeline
 
@@ -60,6 +62,35 @@ pages=2 paragraphs=11 stitched=2 body_fs=10 chars in/out=725/725
 
 `chars in/out` is the conservation check: every non-blank input character
 must appear in exactly one paragraph segment.
+
+## Evaluating snapshots (`--eval`)
+
+Snapshots are saved from the app with **📸 Snapshot** (default folder
+`Documents/PDF-X-Ray/snapshots`, or `$PDFXRAY_SNAPSHOT_DIR`). Each one holds the
+extracted input of the page and its neighbours, the settings in use, the
+user's verdict and — unless the verdict is "both wrong" — a **reference
+segmentation** (the validated leaf blocks).
+
+```powershell
+src-tauri/target/debug/cli_analyze --eval "$env:USERPROFILE/Documents/PDF-X-Ray/snapshots"
+```
+
+```
+snapshot                                      page  ref | snapshot sett. | auto (same pr.) |   auto default
+test2col_p1_manual-better_20261116-080548.js     1    6 | 1.000 (  6 bl) | 1.000 (  6 bl) | 1.000 (  6 bl)
+MEAN F1                                                 |          1.000 |          1.000 |          1.000
+```
+
+Columns: the settings stored in the snapshot, automatic thresholds with the
+snapshot's strategy and priority, default automatic settings (`combined`,
+rows first). The score is the pairwise F1 over lines (two lines are
+"together" when they fall in the same block): 1.0 means the same grouping as
+the reference. A block count lower than the reference means blocks were
+merged (columns not separated); higher means over-segmentation.
+
+The `diag` field of every node in `results.*.root` explains each decision:
+thresholds used, largest gap on each axis (even below threshold), candidate
+gaps, plans tried and the final decision.
 
 ## Input schema
 

@@ -75,9 +75,21 @@ Ordinamento topologico secondo le regole di Breuel, con le immagini come separat
 - I blocchi sono colorati per ruolo. L'inspector mostra ruolo, ordine, testo del blocco, testo ricomposto del paragrafo e traduzione.
 - Il documento viene estratto in background con indicazione dell'avanzamento, a partire dalla pagina corrente.
 - Rendering nitido sugli schermi HiDPI; la toolbar va a capo quando lo spazio non basta.
+- **Barra di avanzamento** durante l'apertura: preparazione, estrazione pagina per pagina e analisi del layout, con il tempo stimato alla fine. La stima dell'analisi si affina con le analisi già eseguite nella sessione.
+- Corretto l'errore all'apertura di un secondo PDF (`state.pdfDoc.destroy is not a function`): con pdf.js 6 il documento precedente si rilascia tramite il loading task.
 - Nuovi formati di esportazione: documento completo in JSON, paragrafi in TXT, unità di traduzione in JSON. L'esportazione HTML ora applica l'escape al testo.
 
-### 11. CLI, strumenti e test
+### 11. Snapshot per tarare le euristiche
+- Pulsante **📸 Snapshot** nel pannello Layout Engine. Salva in `Documenti/PDF-X-Ray/snapshots` un JSON e un PNG della vista. Il JSON contiene:
+  - i dati estratti della pagina e delle pagine vicine;
+  - le impostazioni in uso;
+  - il giudizio dell'utente (manuale meglio, automatico meglio, corretto, entrambi sbagliati) e una nota;
+  - i risultati con le impostazioni correnti, con le soglie automatiche alla stessa priorità e con le impostazioni automatiche predefinite;
+  - la segmentazione di riferimento validata.
+- Diagnostica dei tagli: ogni nodo dell'albero (`diag`) riporta le soglie usate, il gap più grande su ciascun asse anche se sotto soglia, i gap candidati, i tentativi e la decisione finale.
+- `cli_analyze --eval <cartella>` misura quanto le soglie automatiche riproducono i riferimenti (F1 a coppie di righe). Gli snapshot copiati in `src-tauri/tests/snapshots/` con `"minAutoScore"` diventano test di regressione.
+
+### 12. CLI, strumenti e test
 - `cli_analyze` accetta una singola pagina (formato precedente) o un documento `{ "pages": [...], "options": {...} }`.
 - Nuove opzioni di `cli_analyze`:
 
@@ -89,6 +101,7 @@ Ordinamento topologico secondo le regole di Breuel, con le immagini come separat
 | `--no-tags` | ignora le informazioni del Tagged PDF |
 | `--no-stitch` | disattiva la cucitura dei paragrafi |
 | `--distribute` | ridistribuisce un testo tradotto sui segmenti |
+| `--eval` | valuta gli snapshot rispetto alla segmentazione di riferimento |
 
 - `tools/extract_page.js` usa lo stesso estrattore dell'app (`src/extract.js`). Funziona con Node 22 e accetta una pagina, `all` o un intervallo (`10-14`).
 - Nuova suite di test (`npm test`): test unitari per modulo e test di integrazione sui fixture (`src-tauri/tests/fixtures/`), con documenti sintetici multi-pagina e un caso Tagged PDF.

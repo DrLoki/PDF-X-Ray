@@ -193,6 +193,28 @@ box over its segment, with the original leading, weight, style and alignment,
 shrinking the font (down to 45 %) until it fits; boxes that still overflow
 are outlined in amber.
 
+## Tuning with snapshots
+
+Automatic thresholds are heuristics; the way to improve them is to collect
+pages where manual settings do better and measure.
+
+1. In the app, find settings that segment a page correctly (manual sliders or
+   another strategy/priority), then press **📸 Snapshot** and give a verdict
+   and a note. The JSON (plus a PNG of the view) is written to
+   `Documents/PDF-X-Ray/snapshots`.
+2. The snapshot contains the page input (with ±1 neighbour pages), the
+   options, the results of the stored settings, of automatic thresholds with
+   the same strategy/priority and of the default automatic settings — each
+   with the full tree and its **diagnostics** (`diag` on every node:
+   thresholds, largest gaps, plans tried, decision) — and the reference
+   segmentation.
+3. `cli_analyze --eval <folder>` scores every snapshot (pairwise F1 over
+   lines against the reference) so a heuristic change can be measured on all
+   annotated pages at once.
+4. Copy representative snapshots to `src-tauri/tests/snapshots/`; adding
+   `"minAutoScore": 0.95` to one turns it into a regression test
+   (`tests/snapshots.rs`).
+
 ## Tests
 
 ```powershell

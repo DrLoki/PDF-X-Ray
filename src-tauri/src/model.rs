@@ -199,6 +199,35 @@ pub struct LayoutNode {
     pub paragraph_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<LayoutNode>>,
+    /// Why the XY-Cut did (or did not) cut this block: thresholds used,
+    /// candidate gaps, decision. Used by snapshots to tune the heuristics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diag: Option<CutDiag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CutDiag {
+    /// `manual` or `auto:<strategy>`
+    pub source: String,
+    pub dominant_font: f32,
+    pub threshold_x: f32,
+    pub threshold_y: f32,
+    pub min_width: f32,
+    pub min_height: f32,
+    /// Largest internal white-space gap on each axis, even when below threshold.
+    pub largest_x_gap: f32,
+    pub largest_y_gap: f32,
+    /// Internal gaps at or above the threshold.
+    pub x_gaps: Vec<Gap>,
+    pub y_gaps: Vec<Gap>,
+    /// How the column cut was found: `gaps`, `per-row`, `per-row-isolate`, `per-row-centre`, `none`.
+    pub x_plan: String,
+    /// Plans tried in order and their outcome, e.g. `Y gaps: 1 group after merge`.
+    pub tried: Vec<String>,
+    /// Final decision: `cut X`, `cut Y`, `leaf: …`.
+    pub decision: String,
+    pub lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

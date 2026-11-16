@@ -160,6 +160,15 @@
 
         <!-- Document Viewer Workspace -->
         <div class="document-workspace" id="document-workspace">
+          <!-- Analysis progress (extraction + layout analysis) -->
+          <div id="progress-panel" class="progress-panel" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+            <div class="progress-row">
+              <span id="progress-phase" class="progress-phase">Preparazione</span>
+              <span id="progress-detail" class="progress-detail"></span>
+              <span id="progress-eta" class="progress-eta"></span>
+            </div>
+            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          </div>
           <div class="canvas-viewport" id="canvas-viewport">
             <!-- Loading Indicator -->
             <div id="loading-spinner" class="spinner-overlay" style="display: none;">
@@ -244,6 +253,8 @@
               <input type="range" id="range-min-h" min="0" max="50" value="0" />
             </div>
 
+            <div id="auto-hint" class="auto-hint" hidden></div>
+
             <!-- Priority -->
             <div class="control-item">
               <div class="control-label">
@@ -269,7 +280,10 @@
               </label>
             </div>
 
-            <button id="btn-reanalyze" class="btn secondary-btn w-full">Rielabora documento</button>
+            <div class="engine-actions">
+              <button id="btn-reanalyze" class="btn secondary-btn">Rielabora documento</button>
+              <button id="btn-snapshot" class="btn secondary-btn" title="Salva impostazioni, dati della pagina e risultati (manuale vs automatico) per tarare le euristiche">📸 Snapshot</button>
+            </div>
           </div>
         </section>
 
@@ -307,5 +321,29 @@
 
       </aside>
     </div>
+    <!-- Snapshot dialog -->
+    <dialog id="snapshot-dialog" class="snapshot-dialog">
+      <form method="dialog" id="snapshot-form">
+        <h3>📸 Snapshot della pagina <span id="snap-page"></span></h3>
+        <p class="snap-help">Salva i dati estratti della pagina (e delle vicine), le impostazioni correnti e i risultati con le
+          soglie manuali e automatiche, con la diagnostica dei tagli. Gli snapshot con un riferimento servono a misurare e
+          tarare le soglie automatiche (<code>cli_analyze --eval</code>).</p>
+        <div id="snap-settings" class="snap-settings"></div>
+        <fieldset class="snap-verdict">
+          <legend>Giudizio</legend>
+          <label><input type="radio" name="verdict" value="manual-better" checked /> Le impostazioni attuali (manuali) funzionano meglio delle automatiche</label>
+          <label><input type="radio" name="verdict" value="auto-better" /> Le soglie automatiche funzionano meglio delle attuali</label>
+          <label><input type="radio" name="verdict" value="reference" /> Il risultato attuale è corretto (riferimento)</label>
+          <label><input type="radio" name="verdict" value="both-wrong" /> Entrambi sbagliati (descrivi nella nota)</label>
+        </fieldset>
+        <label class="snap-note-label" for="snap-note">Nota: cosa è sbagliato, cosa ti aspetti</label>
+        <textarea id="snap-note" rows="4" placeholder="es. con le soglie automatiche le due colonne restano unite in un solo blocco dopo l'elenco numerato"></textarea>
+        <label class="checkbox-container small"><input type="checkbox" id="snap-png" checked /><span class="checkmark"></span>Includi immagine della vista (PNG)</label>
+        <div class="snap-buttons">
+          <button value="cancel" class="btn secondary-btn" formnovalidate>Annulla</button>
+          <button value="save" id="snap-save" class="btn primary-btn">Salva snapshot</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

@@ -6,7 +6,7 @@
 //! neighbour instead of being skipped.
 
 use crate::lines::{group_rows, weighted_mode, Line};
-use crate::model::{AnalysisOptions, Bounds, Formatting, Gap, LayoutNode, Projections};
+use crate::model::{AnalysisOptions, Bounds, CutDiag, Formatting, Gap, LayoutNode, Projections};
 use std::collections::HashMap;
 
 const MAX_DEPTH: usize = 24;
@@ -44,6 +44,7 @@ struct Plan {
     axis: Axis,
     splits: Vec<f32>,
     strength: f32,
+    kind: &'static str,
 }
 
 struct Ctx<'a> {
@@ -257,7 +258,7 @@ impl<'a> Ctx<'a> {
             b.x < split - 1.0 && b.x1() > split + 1.0
         }).collect();
         if crossing.is_empty() {
-            return Some(Plan { axis: Axis::X, splits: vec![split], strength: min_gap });
+            return Some(Plan { axis: Axis::X, splits: vec![split], strength: min_gap, kind: "per-row" });
         }
         // Horizontal cuts at the top/bottom edges of the crossing lines,
         // where no other line straddles the cut.
@@ -277,10 +278,10 @@ impl<'a> Ctx<'a> {
         ys.sort_by(|a, b| a.total_cmp(b));
         ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
         if !ys.is_empty() {
-            return Some(Plan { axis: Axis::Y, splits: ys, strength: min_gap });
+            return Some(Plan { axis: Axis::Y, splits: ys, strength: min_gap, kind: "per-row-isolate" });
         }
         // Cannot isolate the crossing lines: still cut, assigning them by centre.
-        Some(Plan { axis: Axis::X, splits: vec![split], strength: min_gap * 0.5 })
+        Some(Plan { axis: Axis::X, splits: vec![split], strength: min_gap * 0.5, kind: "per-row-centre" })
     }
 
     fn partition(&self, idxs: &[usize], plan: &Plan, min_extent: f32) -> Vec<Vec<usize>> {
@@ -322,19 +323,37 @@ impl<'a> Ctx<'a> {
 
     fn subdivide(&mut self, idxs: Vec<usize>, depth: usize) -> LayoutNode {
         if idxs.len() <= 1 || depth >= MAX_DEPTH {
-            return self.leaf(idxs, depth);
+            let reason = if idxs.len() <= 1 { "leaf: single line" } else { "leaf: max depth" };
+            let diag = CutDiag { decision: reason.into(), lines: idxs.len(), ..Default::default() };
+            return self.leaf(idxs, depth, Some(diag));
         }
         let (tx, ty, min_w, min_h) = self.thresholds(&idxs);
         let dom = self.dominant_fs(&idxs);
 
-        let xg: Vec<Gap> = self.internal_gaps(&idxs, Axis::X).into_iter().filter(|g| g.size >= tx).collect();
-        let yg: Vec<Gap> = self.internal_gaps(&idxs, Axis::Y).into_iter().filter(|g| g.size >= ty).collect();
+        let all_x = self.internal_gaps(&idxs, Axis::X);
+        let all_y = self.internal_gaps(&idxs, Axis::Y);
+        let largest = |g: &[Gap]| g.iter().map(|g| g.size).fold(0.0, f32::max);
+        let mut diag = CutDiag {
+            source: if self.opts.manual.is_some() { "manual".into() } else { format!("auto:{}", self.opts.strategy) },
+            dominant_font: dom,
+            threshold_x: tx,
+            threshold_y: ty,
+            min_width: min_w,
+            min_height: min_h,
+            largest_x_gap: largest(&all_x),
+            largest_y_gap: largest(&all_y),
+            lines: idxs.len(),
+            ..Default::default()
+        };
+        let xg: Vec<Gap> = all_x.into_iter().filter(|g| g.size >= tx).collect();
+        let yg: Vec<Gap> = all_y.into_iter().filter(|g| g.size >= ty).collect();
 
         let x_plan = if !xg.is_empty() {
             Some(Plan {
                 axis: Axis::X,
                 strength: xg.iter().map(|g| g.size).fold(0.0, f32::max),
                 splits: xg.iter().map(|g| (g.start + g.end) * 0.5).collect(),
+                kind: "gaps",
             })
         } else {
             self.per_row_plan(&idxs, tx, dom)
@@ -344,10 +363,14 @@ impl<'a> Ctx<'a> {
                 axis: Axis::Y,
                 strength: yg.iter().map(|g| g.size).fold(0.0, f32::max),
                 splits: yg.iter().map(|g| (g.start + g.end) * 0.5).collect(),
+                kind: "gaps",
             })
         } else {
             None
         };
+        diag.x_plan = x_plan.as_ref().map(|p| p.kind).unwrap_or("none").into();
+        diag.x_gaps = xg;
+        diag.y_gaps = yg;
 
         let plans: Vec<Plan> = match self.opts.priority.as_str() {
             "X" => [x_plan, y_plan].into_iter().flatten().collect(),
@@ -362,7 +385,10 @@ impl<'a> Ctx<'a> {
         for plan in plans {
             let min_extent = if plan.axis == Axis::X { min_w } else { min_h };
             let groups = self.partition(&idxs, &plan, min_extent);
+            let axis = if plan.axis == Axis::X { "X" } else { "Y" };
+            diag.tried.push(format!("{} {} ({} splits): {} groups after merging < {:.1}pt", axis, plan.kind, plan.splits.len(), groups.len(), min_extent));
             if groups.len() >= 2 {
+                diag.decision = format!("cut {} into {}", axis, groups.len());
                 let my_id = self.next_id();
                 let bounds = self.bbox(&idxs);
                 let children = groups.into_iter().map(|g| self.subdivide(g, depth + 1)).collect();
@@ -380,10 +406,19 @@ impl<'a> Ctx<'a> {
                     reading_order: None,
                     paragraph_ids: None,
                     children: Some(children),
+                    diag: Some(diag),
                 };
             }
         }
-        self.leaf(idxs, depth)
+        diag.decision = if diag.tried.is_empty() {
+            format!(
+                "leaf: no gap above threshold (largest X {:.1} < {:.1}, largest Y {:.1} < {:.1})",
+                diag.largest_x_gap, tx, diag.largest_y_gap, ty
+            )
+        } else {
+            "leaf: every cut collapsed into one group (thin groups merged)".into()
+        };
+        self.leaf(idxs, depth, Some(diag))
     }
 
     fn next_id(&mut self) -> String {
@@ -391,7 +426,7 @@ impl<'a> Ctx<'a> {
         format!("p{}-b{}", self.page_num, self.counter)
     }
 
-    fn leaf(&mut self, idxs: Vec<usize>, depth: usize) -> LayoutNode {
+    fn leaf(&mut self, idxs: Vec<usize>, depth: usize, diag: Option<CutDiag>) -> LayoutNode {
         let id = self.next_id();
         let rows = group_rows(self.lines, &idxs);
         let ordered: Vec<usize> = rows.iter().flatten().copied().collect();
@@ -420,6 +455,7 @@ impl<'a> Ctx<'a> {
             reading_order: None,
             paragraph_ids: None,
             children: None,
+            diag,
         }
     }
 }
@@ -605,6 +641,7 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
             reading_order: None,
             paragraph_ids: None,
             children: Some(children),
+            diag: None,
         });
     }
 
@@ -618,12 +655,14 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
     let body: Vec<usize> = (0..lines.len()).filter(|&i| owner[i].is_none()).collect();
     let mut root_children: Vec<LayoutNode> = Vec::new();
     let mut root_cut = None;
+    let mut root_diag = None;
     if !body.is_empty() {
         let node = ctx.subdivide(body, 1);
         if node.node_type == "leaf" {
             root_children.push(node);
         } else {
             root_cut = node.cut_direction.clone();
+            root_diag = node.diag.clone();
             root_children.extend(node.children.unwrap_or_default());
         }
     }
@@ -652,6 +691,8 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
         reading_order: None,
         paragraph_ids: None,
         children: Some(root_children),
+        // the body's first cut is flattened into the root: keep its diagnostics
+        diag: root_diag,
     };
     let mut order = Vec::new();
     walk_order(&mut root, &mut order);

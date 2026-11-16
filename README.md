@@ -39,7 +39,11 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
 6. **Bi-directional Synced Interlock & Inspector**:
    - Hovering/clicking a block on the canvas highlights it in the layout DOM tree and vice versa; the inspector shows role, reading order, font, alignment, the block text and the logical paragraphs it belongs to (full stitched text and translation).
 
-7. **Export**:
+7. **Snapshots for heuristic tuning**:
+   - **📸 Snapshot** saves the page data, the settings, the results with the current and with the automatic thresholds (including per-node diagnostics: thresholds, largest gaps, decisions), your verdict, a note and a PNG of the view to `Documents/PDF-X-Ray/snapshots`.
+   - `cli_analyze --eval <folder>` scores the automatic settings against the validated segmentations, so heuristic changes can be measured across all annotated pages.
+
+8. **Export**:
    - Page layout tree as **JSON**, **XML** or **HTML**; whole document result as JSON; logical paragraphs as text; translation units as JSON.
 
 ---
