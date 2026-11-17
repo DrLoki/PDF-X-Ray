@@ -4,4 +4,4 @@ Copia qui gli snapshot salvati dall'app (pulsante 📸 Snapshot, cartella Docume
 Il test `tests/snapshots.rs` li valuta; con `"minAutoScore": 0.9` uno snapshot diventa un test di regressione.
 
     cargo test --test snapshots -- --nocapture
-    target/debug/cli_analyze --eval tests/snapshots
+    cargo run --features cli --bin cli_analyze -- --eval tests/snapshots

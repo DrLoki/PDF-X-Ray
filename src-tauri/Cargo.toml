@@ -15,6 +15,16 @@ default-run = "pdf-xray"
 name = "pdf_xray_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The headless analyzer is a developer tool: it is built only with
+# `--features cli`, so the Tauri bundler leaves it out of the app packages.
+[[bin]]
+name = "cli_analyze"
+path = "src/bin/cli_analyze.rs"
+required-features = ["cli"]
+
+[features]
+cli = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

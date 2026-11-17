@@ -8,8 +8,8 @@ regression checks and parameter comparisons without the GUI.
 
 ```powershell
 cd src-tauri
-cargo build --bin cli_analyze          # target/debug/cli_analyze.exe
-cargo build --release --bin cli_analyze
+cargo build --features cli --bin cli_analyze        # target/debug/cli_analyze.exe
+cargo build --release --features cli --bin cli_analyze
 ```
 
 ## Usage

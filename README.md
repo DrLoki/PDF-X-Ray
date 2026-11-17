@@ -129,7 +129,7 @@ Runs the same pipeline as the app on a page or a whole document.
 
 ```powershell
 cd src-tauri
-cargo build --bin cli_analyze
+cargo build --features cli --bin cli_analyze
 
 # logical paragraphs in reading order, with roles and joins
 target/debug/cli_analyze --text ../doc.json
