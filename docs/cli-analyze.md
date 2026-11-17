@@ -1,6 +1,6 @@
 # `cli_analyze` — Headless Analyzer
 
-`src-tauri/src/bin/cli_analyze.rs` runs the same Rust pipeline as the desktop
+`src-tauri/examples/cli_analyze.rs` runs the same Rust pipeline as the desktop
 app (`pipeline::analyze_document`) from the command line: batch analysis,
 regression checks and parameter comparisons without the GUI.
 
@@ -8,8 +8,8 @@ regression checks and parameter comparisons without the GUI.
 
 ```powershell
 cd src-tauri
-cargo build --features cli --bin cli_analyze        # target/debug/cli_analyze.exe
-cargo build --release --features cli --bin cli_analyze
+cargo build --example cli_analyze            # target/debug/examples/cli_analyze.exe
+cargo build --release --example cli_analyze
 ```
 
 ## Usage
@@ -41,13 +41,13 @@ cli_analyze --eval [--json] SNAPSHOT_OR_DIR...
 ```powershell
 # whole document (same extractor as the app, Node 18+)
 node tools/extract_page.js "C:/path/doc.pdf" all > doc.json
-src-tauri/target/debug/cli_analyze --text doc.json
+src-tauri/target/debug/examples/cli_analyze --text doc.json
 
 # a page range, columns first
-node tools/extract_page.js "C:/path/doc.pdf" 10-14 | src-tauri/target/debug/cli_analyze --text --priority X
+node tools/extract_page.js "C:/path/doc.pdf" 10-14 | src-tauri/target/debug/examples/cli_analyze --text --priority X
 
 # full JSON result
-src-tauri/target/debug/cli_analyze doc.json > result.json
+src-tauri/target/debug/examples/cli_analyze doc.json > result.json
 ```
 
 Example `--text` output:
@@ -72,7 +72,7 @@ user's verdict and — unless the verdict is "both wrong" — a **reference
 segmentation** (the validated leaf blocks).
 
 ```powershell
-src-tauri/target/debug/cli_analyze --eval "$env:USERPROFILE/Documents/PDF-X-Ray/snapshots"
+src-tauri/target/debug/examples/cli_analyze --eval "$env:USERPROFILE/Documents/PDF-X-Ray/snapshots"
 ```
 
 ```

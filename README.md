@@ -123,19 +123,19 @@ python tools/extract_page_py.py "C:/path/to/document.pdf" <pageNum> > page.json
 
 ---
 
-### `src-tauri/src/bin/cli_analyze.rs` — Headless Analyzer (Rust)
+### `src-tauri/examples/cli_analyze.rs` — Headless Analyzer (Rust)
 
 Runs the same pipeline as the app on a page or a whole document.
 
 ```powershell
 cd src-tauri
-cargo build --features cli --bin cli_analyze
+cargo build --example cli_analyze
 
 # logical paragraphs in reading order, with roles and joins
-target/debug/cli_analyze --text ../doc.json
+target/debug/examples/cli_analyze --text ../doc.json
 
 # full JSON result, columns first
-target/debug/cli_analyze --priority X ../doc.json > result.json
+target/debug/examples/cli_analyze --priority X ../doc.json > result.json
 ```
 
 See [`docs/cli-analyze.md`](docs/cli-analyze.md) for flags and the input/output schema.
