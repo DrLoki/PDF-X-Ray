@@ -27,7 +27,7 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
    - Live overlays: text runs, blocks coloured by role, projection histograms and gaps.
 
 4. **Roles & Reading Flow**:
-   - Every block gets a role: `body`, `heading`, `header`, `footer`, `page-number`, `caption`, `footnote`, `sidebar`, `table`, `figure-text`. Running heads and folios are confirmed by their repetition across pages.
+   - Every block gets a role: `body`, `heading`, `header`, `footer`, `page-number`, `caption`, `footnote`, `sidebar`, `table`, `figure-text`, `decoration` (ornamental glyphs, not translated). Running heads and folios are confirmed by their repetition across pages.
    - Reading order is a topological sort (Breuel) that is robust to figures and full-width elements; Tagged PDFs use their structure tree and `/Artifact` marks.
    - Blocks are split into paragraphs (leading, indents, hanging indents, short last lines, bullets, size/weight changes) and paragraphs interrupted by **column, page, box or figure breaks are stitched** back together, with de-hyphenation.
    - The **Paragrafi** tab lists the logical paragraphs; the **Flow** overlay shows reading-order badges and continuation arrows (`↪ p.N` / `↩ p.N`).

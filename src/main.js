@@ -17,6 +17,7 @@ const ROLE_COLORS = {
   sidebar: '#f472b6',
   table: '#facc15',
   'figure-text': '#fb923c',
+  decoration: '#78716c',
 };
 const roleColor = (r) => ROLE_COLORS[r] || '#34d399';
 

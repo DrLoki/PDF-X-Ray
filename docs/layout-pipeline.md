@@ -49,12 +49,15 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
   `restore`, `transform`, form XObjects). pdf.js ≥ 5 encodes paths as
   `constructPath [paintOp, [Float32Array], minMax]` with `DrawOPS`; closed
   axis-aligned quadrilaterals that are stroked or filled become rectangles,
+  and so do rounded rectangles (axis-aligned sides joined by corner curves,
+  the sides covering ≥ 70 % of the perimeter, no oblique segment);
   `paintImageXObject` & co. become image boxes (the unit square under the CTM).
 
 ## 2. Lines (`lines.rs`)
 
 Runs are swept **left → right**. A run joins the line whose right end is
-horizontally adjacent (gap ≤ 1 em) and whose core overlaps it vertically by at
+horizontally adjacent (gap ≤ 1 em of the *smaller* of the two fonts, so a
+display heading cannot stretch a body line across a gutter) and whose core overlaps it vertically by at
 least half the smaller height; otherwise it starts a new line. Consequences:
 
 * column gutters and table gaps always split lines;
@@ -69,6 +72,14 @@ changes) are rebuilt (`tra` + `duzione` → `traduzione`).
 right is merged into the first line it introduces (`T` + `he Cosmere` →
 `The Cosmere`); its box is remembered so the indented lines beside it are not
 taken for new paragraphs.
+
+**Decorative glyphs**: a font used on the page only for stacked 1–2 character
+runs of letters/digits at ≥ body size, at least four times (an ornament column
+drawn with a symbol font), is a *glyph font*. Its runs are never drop caps,
+never join lines of other fonts, and lines made only of them are flagged
+`decor`: XY-Cut leaves them out of the cuts (one separate leaf) and they get
+the `decoration` role (not translatable). Bullets (not alphanumeric),
+superscripts (smaller than body text) and drop caps (isolated) don't qualify.
 
 ## 3. XY-Cut (`xycut.rs`)
 
@@ -104,14 +115,26 @@ direction is tried first. When the global X gaps only isolate thin groups (a
 vertical credit in the margin, a folio) and collapse on partition, the
 per-row column vote is tried as well.
 
-**Background images.** An image with at least 3 lines printed over it,
-covering ≥ 10 % of its area, is decorative artwork, not an obstacle: it would
-otherwise hide the column gutter it spans.
+**Background images.** An image is decorative artwork, not an obstacle, when
+at least 3 lines are printed over it covering ≥ 10 % of its area, when its
+edge runs through ≥ 2 lines (text flows around figures, never across them),
+or when it bleeds off the page with text on it (an ornamental page edge).
+Inside a block, an obstacle with one of the block's own lines printed on it
+is ignored as well. Background images are not reading-order separators and
+don't make captions.
 
 **Boxes.** Rectangles are cleaned (page frames, rules, duplicates removed);
-groups of ≥ 3 touching rectangles become one **table**. Each line goes to the
-smallest box containing its centre; a box gets its own sub-tree. A shading
-behind a single row (highlighted heading) is not a box.
+groups of ≥ 3 touching rectangles become one **table**. A rectangle that
+bleeds off the page or whose edge runs through ≥ 2 lines is decoration and is
+dropped. Each line goes to the smallest box containing its centre; a box gets
+its own sub-tree. A shading behind a single row (highlighted heading, shaded
+table row) is not a box: its lines go to the next enclosing box, or to the
+body. For the body cuts a box is an obstacle by its *text extent* (the frame's
+padding and the ornaments inside it must not narrow a neighbouring gutter).
+
+**Per-row column vote.** When the lines crossing the voted split cannot be
+isolated with horizontal cuts and they outnumber the voting rows, the votes
+are word spaces of loosely justified lines: no split.
 
 ## 4. Roles (`roles.rs`)
 
@@ -119,16 +142,17 @@ Per block, in this order:
 
 1. **Tagged PDF**: ≥ 80 % `/Artifact` → `header` / `footer` / `page-number`;
    structure roles map to `heading`, `caption`, `footnote`, `table`, `figure-text`.
-2. **Boxes**: `table`, `sidebar` (or `caption` if it starts with "Figure…").
-3. **Vertical text** (credits, margin labels) → `figure-text`.
-4. **Margins**: page-number patterns (`12`, `xii`, `Page 3`, `3 / 120`,
+2. **Decorative glyphs** (see Lines) → `decoration`.
+3. **Boxes**: `table`, `sidebar` (or `caption` if it starts with "Figure…").
+4. **Vertical text** (credits, margin labels) → `figure-text`.
+5. **Margins**: page-number patterns (`12`, `xii`, `Page 3`, `3 / 120`,
    `Pag. 7 di 30`) in the outer 12 % → `page-number`; ≤ 2 rows in the outer
    7 % → `header` / `footer`.
-5. **Captions**: caption prefix (`Fig.`, `Figure`, `Tabella`, `Abb.`, `Source:`…)
+6. **Captions**: caption prefix (`Fig.`, `Figure`, `Tabella`, `Abb.`, `Source:`…)
    and/or adjacency to an image, with smaller or italic type.
-6. **Footnotes**: lower part of the page, type ≤ 90 % of the body size,
+7. **Footnotes**: lower part of the page, type ≤ 90 % of the body size,
    starting with a marker (digit, `*`, `†`, superscript).
-7. Otherwise `body` (later split into `heading` / `body` per paragraph).
+8. Otherwise `body` (later split into `heading` / `body` per paragraph).
 
 **Running heads across pages**: blocks in the outer 12 % bands with ≤ 2 rows
 whose *repetition key* (lower-case, digits → `#`, roman folios folded) recurs

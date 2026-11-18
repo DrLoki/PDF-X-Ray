@@ -148,7 +148,7 @@ gaps, plans tried and the final decision.
   }],
   "paragraphs": [{
     "id": "par5",
-    "role": "body",              // body, heading, header, footer, page-number, caption, footnote, sidebar, table, figure-text
+    "role": "body",              // body, heading, header, footer, page-number, caption, footnote, sidebar, table, figure-text, decoration
     "text": "…",                 // stitched, de-hyphenated: the unit of translation
     "translatable": true,
     "segments": [{ "pageNum": 1, "blockId": "p1-b7", "bounds": {…}, "lines": [Bounds], "text": "…",
