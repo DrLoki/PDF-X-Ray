@@ -84,6 +84,8 @@ fn write_back(node: &mut LayoutNode, info: &HashMap<String, (&'static str, Vec<S
 }
 
 pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> DocumentResult {
+    let pages: Vec<PageInput> = pages.iter().map(PageInput::sanitized).collect();
+    let pages = &pages[..];
     // 1. lines
     let page_lines: Vec<PageLines> = pages.iter().map(|p| build_lines(&p.items)).collect();
     let body_fs = weighted_mode(page_lines.iter().flat_map(|pl| pl.lines.iter().map(|l| (l.fs, l.chars()))), 10.0);

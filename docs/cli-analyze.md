@@ -118,6 +118,11 @@ gaps, plans tried and the final decision.
 | `artifact` | bool | inside `/Artifact` |
 | `struct_id` | number? | block-level structure element (tree order) |
 | `struct_role` | string? | its role (`P`, `H1`, `Caption`, …) |
+| `rot` | number? | baseline direction in degrees, screen coordinates, clockwise (0 horizontal, 90 top→bottom, 270 bottom→top); when absent, a tall run of ≥ 3 characters is taken as 90 |
+
+Coordinates may be `null` (a non-finite value from the extractor): such runs,
+boxes and images are dropped on input. A run painted twice at the same place
+(faux bold) is read once.
 
 ### `AnalysisOptions`
 

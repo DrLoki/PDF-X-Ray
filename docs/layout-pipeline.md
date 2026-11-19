@@ -73,6 +73,13 @@ right is merged into the first line it introduces (`T` + `he Cosmere` →
 `The Cosmere`); its box is remembered so the indented lines beside it are not
 taken for new paragraphs.
 
+**Rotated text**: runs are grouped by reading direction (0°, 90°, 180°,
+270°) and swept into lines in their own frame, where the text is horizontal:
+text rotated 90° reads top→bottom with its lines from right to left, 270°
+bottom→top with lines from left to right. Each line keeps its frame bounds
+(`fb`); row grouping and indentation use them, so a rotated caption reads in
+order and small-caps runs of a credit join up (`GORDON M` + `C` + `ALPIN`).
+
 **Decorative glyphs**: a font used on the page only for stacked 1–2 character
 runs of letters/digits at ≥ body size, at least four times (an ornament column
 drawn with a symbol font), is a *glyph font*. Its runs are never drop caps,
@@ -134,7 +141,14 @@ padding and the ornaments inside it must not narrow a neighbouring gutter).
 
 **Per-row column vote.** When the lines crossing the voted split cannot be
 isolated with horizontal cuts and they outnumber the voting rows, the votes
-are word spaces of loosely justified lines: no split.
+are word spaces of loosely justified lines: no split. When they can be
+isolated but that takes more than 2 × votes + 2 cuts, the "column" is a local
+feature (OCR drop-cap debris, a short indented run) and isolating would
+shatter running text into single lines: no split either.
+
+**Rotated lines** are kept out of the body cuts and subdivided on their own,
+per direction; their blocks get the `figure-text` role (also when a Tagged
+PDF marks them as artifacts).
 
 ## 4. Roles (`roles.rs`)
 
@@ -144,7 +158,7 @@ Per block, in this order:
    structure roles map to `heading`, `caption`, `footnote`, `table`, `figure-text`.
 2. **Decorative glyphs** (see Lines) → `decoration`.
 3. **Boxes**: `table`, `sidebar` (or `caption` if it starts with "Figure…").
-4. **Vertical text** (credits, margin labels) → `figure-text`.
+4. **Rotated or vertical text** (credits, margin labels) → `figure-text`.
 5. **Margins**: page-number patterns (`12`, `xii`, `Page 3`, `3 / 120`,
    `Pag. 7 di 30`) in the outer 12 % → `page-number`; ≤ 2 rows in the outer
    7 % → `header` / `footer`.
