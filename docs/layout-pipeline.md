@@ -242,6 +242,12 @@ box over its segment, with the original leading, weight, style and alignment,
 shrinking the font (down to 45 %) until it fits; boxes that still overflow
 are outlined in amber.
 
+Each segment also carries its reading direction (`rot`: 0, 90, 180 or 270,
+the prevailing direction of its lines). For rotated segments the alignment is
+measured in the reading frame (`fb`), where the lines run horizontally.
+GianoReader uses `rot` to lay out the translation box in the text direction
+and rotate it like the original.
+
 ## Tuning with snapshots
 
 Automatic thresholds are heuristics; the way to improve them is to collect

@@ -158,7 +158,7 @@ boxes and images are dropped on input. A run painted twice at the same place
     "translatable": true,
     "segments": [{ "pageNum": 1, "blockId": "p1-b7", "bounds": {…}, "lines": [Bounds], "text": "…",
                    "charCount": 180, "fontSize": 10, "fontName": "…", "bold": false, "italic": false,
-                   "alignment": "justify" }],
+                   "alignment": "justify", "rot": 0 }],   // rot: reading direction, 0/90/180/270
     "joins": [{ "atSegment": 1, "kind": "page", "interrupted": true, "dehyphenated": false }]
   }],
   "stats": { "pageCount": 2, "paragraphCount": 11, "stitchedJoins": 2, "bodyFontSize": 10,

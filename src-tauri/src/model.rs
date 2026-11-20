@@ -335,6 +335,11 @@ pub struct Segment {
     pub bold: bool,
     pub italic: bool,
     pub alignment: String,
+    /// Reading direction of the segment in degrees, clockwise (0, 90, 180,
+    /// 270): the prevailing direction of its lines, weighted by characters.
+    /// GianoReader uses it to rotate the translation box like the original.
+    #[serde(default)]
+    pub rot: u16,
 }
 
 /// How two consecutive segments of the same paragraph are connected.

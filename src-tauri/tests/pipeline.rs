@@ -328,3 +328,25 @@ fn doubled_runs_are_read_once() {
     assert!(r.paragraphs.iter().any(|p| p.text.starts_with("As you step")), "{:#?}", r.paragraphs.iter().map(|p| &p.text).collect::<Vec<_>>());
     assert_eq!(r.stats.input_chars, r.stats.output_chars);
 }
+
+// Each segment carries its reading direction, so the translation
+// box can be rotated like the original text.
+#[test]
+fn segments_carry_their_rotation() {
+    let mut items = Vec::new();
+    for k in 0..6 {
+        items.push(TextElement { text: format!("Body line {k} of running text in the column"), x: 72.0, y: 100.0 + 12.0 * k as f32, width: 216.0, height: 12.0, font_size: 9.0, ..Default::default() });
+    }
+    let cap = |text: &str, x: f32| TextElement { text: text.into(), x, y: 100.0, width: 12.0, height: 150.0, font_size: 11.0, rot: Some(90.0), ..Default::default() };
+    items.push(cap("second line of the caption.", 296.0));
+    items.push(cap("First line of a rotated caption", 308.0));
+    items.push(TextElement { text: "Photo credit".into(), x: 40.0, y: 150.0, width: 9.0, height: 60.0, font_size: 8.0, rot: Some(270.0), ..Default::default() });
+    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![] };
+    let r = analyze(&[page]);
+    let rot_of = |prefix: &str| find(&r, prefix).segments.iter().map(|s| s.rot).collect::<Vec<_>>();
+    assert_eq!(rot_of("Body line 0"), vec![0]);
+    assert_eq!(rot_of("First line"), vec![90]);
+    assert_eq!(rot_of("Photo credit"), vec![270]);
+    let cap = &find(&r, "First line").segments[0];
+    assert_eq!(cap.alignment, "left");
+}
