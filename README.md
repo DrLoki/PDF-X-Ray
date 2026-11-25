@@ -38,7 +38,7 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
 
 6. **OCR for scanned pages**:
    - Pages without a text layer (scans, image-only pages) are detected automatically and recognised with **PaddleOCR PP-OCRv5** (Latin script, accents included) running in Rust on `rten`, entirely offline. The recognised lines feed the same layout pipeline as a text layer.
-   - Override per document or per page (*Automatico* / *Strato di testo* / *OCR*); uncertain words are highlighted in the **Words** overlay.
+   - Override per document or per page (*Automatico* / *Strato di testo* / *OCR*); uncertain words are highlighted in the **Words** overlay. The current page is recognised first and can be read at once; the rest of the document is recognised in the background, following the page you are reading.
    - The models (12 MB) are downloaded once, on first use and only after confirmation, then verified by SHA-256.
    - OCR snapshots save the image given to the engine and a reference transcription; `cli_analyze --eval-ocr` measures CER / WER of the current engine on them.
    - **Comics**: on scanned comic pages the panels and the text containers (speech balloons, narration boxes, free text, sound effects) are detected on the page image; each container becomes one translation unit, in comic reading order (left to right, or right to left for manga-style books). Detected automatically, or forced per document / page (*Fumetto*); `cli_analyze --eval-comic` scores comic snapshots.

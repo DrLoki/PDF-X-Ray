@@ -44,6 +44,10 @@ const state = {
   ocrResults: new Map(),     // pageNum → { page, items, scale, dpi } from `ocr_page`
   pageModes: new Map(),      // pageNum → 'text'|'ocr' (overrides the document mode)
   ocrDeclined: false,        // the user refused the model download in this session
+  ocrFailed: new Set(),      // pages whose OCR failed (not retried by the background queue)
+  ocrWorker: null,           // load token of the running background OCR queue, or null
+  ocrStats: { done: 0, t0: 0, lastAnalysis: 0 },
+  analysisSeq: 0,            // only the latest analysis result is applied
   extractionDone: false,
   doc: null,                 // DocumentResult
   pageResults: new Map(),    // pageNum → PageResult
@@ -423,6 +427,8 @@ async function loadPDFFile(file) {
     state.pageKinds.clear();
     state.ocrResults.clear();
     state.pageModes.clear();
+    state.ocrFailed.clear();
+    state.ocrWorker = null;
     state.pageResults.clear();
     state.paraById.clear();
     state.doc = null;
@@ -521,49 +527,107 @@ async function classifyPages() {
 }
 
 /**
- * Make `pageData` follow the text source of every page: OCR the pages that
- * need it (asking for the models first), restore the text layer elsewhere.
- * Returns true when the OCR ran (the progress bar then restarts for the analysis).
+ * Make `pageData` follow the text source of every page: restore the text
+ * layer where it is used, OCR the current page right away (asking for the
+ * models first) and leave the other pages to the background queue
+ * (`ocrBackground`), so the document can be read while the OCR goes on.
+ * Returns true when the OCR ran on the current page.
  */
 async function prepareTextSources(token) {
   if (!isTauri()) return false;
   const n = state.totalPageCount;
-  const order = [state.pageNum, ...Array.from({ length: n }, (_, i) => i + 1).filter(p => p !== state.pageNum)];
-  for (const p of order) {
+  for (let p = 1; p <= n; p++) {
     if (effectiveMode(p) === 'text' && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+    else if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
   }
-  const todo = order.filter(p => usesOcr(effectiveMode(p)));
-  const missing = todo.filter(p => !state.ocrResults.has(p));
+  const missing = ocrQueue();
   if (missing.length && !(await ensureOcrModels(missing.length))) {
     // without models the text layer stays in use
-    for (const p of todo) if (state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+    for (let p = 1; p <= n; p++) if (usesOcr(effectiveMode(p)) && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
     refreshOcrControls();
     return false;
   }
   let ran = false;
-  const t0 = performance.now();
-  for (let k = 0; k < missing.length; k++) {
-    if (token !== state.loadToken) return ran;
-    const p = missing[k];
-    progressOcr(k, missing.length, p, t0);
-    try {
-      const raster = await rasterizePage(state.pdfDoc, p, OCR_DPI);
-      const res = await recognizeCanvas(window.__TAURI__.core.invoke, raster);
-      state.ocrResults.set(p, { ...res, dpi: raster.dpi });
-      ran = true;
-    } catch (err) {
-      console.error('OCR failed on page ' + p, err);
-      setStatus(`OCR fallito a pagina ${p}: ${err}`, 'warn');
-    }
-    if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
-    if (p === state.pageNum) { drawOverlay(); refreshOcrControls(); }
+  if (missing[0] === state.pageNum) {
+    if (state.ocrWorker !== token) state.ocrStats = { done: 0, t0: performance.now(), lastAnalysis: 0 };
+    ran = await ocrOnePage(state.pageNum, token);
   }
-  for (const p of todo) {
-    if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
-  }
-  if (missing.length) progressOcr(missing.length, missing.length, missing[missing.length - 1], t0);
+  if (token !== state.loadToken) return ran;
+  if (ocrQueue().length) ocrBackground(token);
   refreshOcrControls();
   return ran;
+}
+
+/**
+ * Pages still waiting for the OCR, in the order the background queue takes
+ * them: the current page, the following pages, then the preceding ones.
+ */
+function ocrQueue() {
+  const n = state.totalPageCount;
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const p = ((state.pageNum - 1 + k) % n) + 1;
+    if (usesOcr(effectiveMode(p)) && !state.ocrResults.has(p) && !state.ocrFailed.has(p)) out.push(p);
+  }
+  return out;
+}
+
+/** Rasterise and recognise one page; its input switches to the OCR text. */
+async function ocrOnePage(p, token) {
+  const total = state.ocrStats.done + ocrQueue().length;
+  progressOcr(state.ocrStats.done, total, p, state.ocrStats.t0);
+  try {
+    const raster = await rasterizePage(state.pdfDoc, p, OCR_DPI);
+    const res = await recognizeCanvas(window.__TAURI__.core.invoke, raster);
+    if (token !== state.loadToken) return false;
+    state.ocrResults.set(p, { ...res, dpi: raster.dpi });
+  } catch (err) {
+    console.error('OCR failed on page ' + p, err);
+    state.ocrFailed.add(p);
+    setStatus(`OCR fallito a pagina ${p}: ${err}`, 'warn');
+    return false;
+  }
+  state.ocrStats.done++;
+  state.pageData.set(p, ocrPageInput(p));
+  if (p === state.pageNum) { drawOverlay(); refreshOcrControls(); }
+  return true;
+}
+
+/**
+ * Background OCR of the remaining pages. The queue is re-read after every
+ * page, so moving to a page not recognised yet makes it the next one, and a
+ * change of mode adds or removes pages. The layout is re-analysed when a
+ * page near the one being read is done (and at least every 20 s), then once
+ * more at the end.
+ */
+async function ocrBackground(token) {
+  if (state.ocrWorker === token) return; // already running: it reads the queue again after each page
+  state.ocrWorker = token;
+  if (!state.ocrStats.t0) state.ocrStats = { done: 0, t0: performance.now(), lastAnalysis: 0 };
+  try {
+    for (;;) {
+      if (token !== state.loadToken) return;
+      const p = ocrQueue()[0];
+      if (!p) break;
+      const ok = await ocrOnePage(p, token);
+      if (token !== state.loadToken) return;
+      const near = p >= state.pageNum - 1 && p <= state.pageNum + 2;
+      if (ok && (near || performance.now() - state.ocrStats.lastAnalysis > 20000)) {
+        state.ocrStats.lastAnalysis = performance.now();
+        await runAnalysis(false);
+      }
+    }
+  } finally {
+    if (state.ocrWorker === token) state.ocrWorker = null;
+  }
+  if (token !== state.loadToken) return;
+  const { done, t0 } = state.ocrStats;
+  state.ocrStats = { done: 0, t0: 0, lastAnalysis: 0 };
+  if (done) {
+    progressOcr(done, done, state.pageNum, t0);
+    await runAnalysis(false);
+  }
+  refreshOcrControls();
 }
 
 /** Re-apply the text sources after a change of mode, then re-analyse. */
@@ -571,7 +635,7 @@ async function applyTextSources() {
   refreshOcrControls();
   if (!state.pdfDoc || !state.extractionDone) return;
   const token = state.loadToken;
-  const ocrRan = await prepareTextSources(token);
+  await prepareTextSources(token);
   if (token !== state.loadToken) return;
   await runAnalysis(false);
 }
@@ -580,8 +644,16 @@ function progressOcr(done, total, pageNum, t0) {
   const elapsed = performance.now() - t0;
   const per = done ? elapsed / done : null;
   const eta = per === null ? 'stima in corso…' : done >= total ? '' : `~${formatDuration(per * (total - done))} rimanenti`;
-  paintProgress('OCR', `pagina ${pageNum} · ${done}/${total}`, total ? done / total : 1, eta, done === 0);
-  setStatus(done >= total ? `OCR completato: ${total} pagine` : `OCR ${done}/${total}…`);
+  const background = done > 0 && done < total ? ' · le pagine pronte sono già consultabili' : '';
+  paintProgress('OCR', `pagina ${pageNum} · ${done}/${total}${background}`, total ? done / total : 1, eta, done === 0);
+  if (done >= total) setStatus(`OCR completato: ${total} pagine`);
+}
+
+/** " · OCR k/N in corso" while the background queue runs. */
+function ocrStatusSuffix() {
+  if (state.ocrWorker !== state.loadToken) return '';
+  const left = ocrQueue().length;
+  return left ? ` · OCR in corso: ${left} pagine in coda` : '';
 }
 
 /** Ask for the model download when the models are missing. Resolves to true when they are installed. */
@@ -661,7 +733,9 @@ function refreshOcrControls() {
       hint += comic ? ` Fumetto: ${found}.` : c.isComic ? ` Sembra un fumetto (${found}).` : '';
     }
   } else if (usesOcr(mode)) {
-    hint += state.ocrDeclined ? ' OCR non attivo: modelli non scaricati.' : ' OCR in attesa.';
+    hint += state.ocrDeclined ? ' OCR non attivo: modelli non scaricati.'
+      : state.ocrFailed.has(p) ? ' OCR fallito su questa pagina.'
+      : state.ocrWorker === state.loadToken ? ' OCR in corso in background: questa pagina è la prossima.' : ' OCR in attesa.';
   }
   el.ocrHint.textContent = hint;
   el.ocrHint.hidden = false;
@@ -719,13 +793,16 @@ async function runAnalysis(fullRun = false) {
   }
   if (!state.extractionDone) return; // analysis starts automatically when extraction ends
   const token = state.loadToken;
+  const seq = ++state.analysisSeq;
   const pages = Array.from({ length: state.totalPageCount }, (_, i) => state.pageData.get(i + 1)).filter(Boolean);
-  setStatus('Analisi in corso…');
-  const t0 = progressAnalyze(pages.length, fullRun === true);
+  // during the background OCR the progress panel belongs to the OCR
+  const quiet = state.ocrWorker === token;
+  if (!quiet) setStatus('Analisi in corso…');
+  const t0 = quiet ? performance.now() : progressAnalyze(pages.length, fullRun === true);
   try {
     const options = analysisOptions();
     const doc = await window.__TAURI__.core.invoke('analyze_document', { pages, options });
-    if (token !== state.loadToken) return;
+    if (token !== state.loadToken || seq !== state.analysisSeq) return;
     state.doc = doc;
     state.docOptions = options;
     state.pageResults = new Map(doc.pages.map(p => [p.pageNum, p]));
@@ -734,14 +811,14 @@ async function runAnalysis(fullRun = false) {
     state.selectedBlockId = null;
     const s = doc.stats;
     const lost = s.inputChars - s.outputChars;
-    setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : ''), lost ? 'warn' : 'ok');
-    progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
+    setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : '') + ocrStatusSuffix(), lost ? 'warn' : 'ok');
+    if (!quiet) progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
     await recomputePieces();
     refreshPageUI();
   } catch (err) {
     console.error('Analysis failed:', err);
     setStatus('Analisi fallita: ' + err, 'warn');
-    if (token === state.loadToken) progressFail('analisi fallita: ' + err);
+    if (token === state.loadToken && !quiet) progressFail('analisi fallita: ' + err);
   }
 }
 

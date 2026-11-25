@@ -268,6 +268,16 @@ up). Scans that already carry a text layer (an invisible OCR layer) keep it.
 The UI can override per document (*Automatico* / *Strato di testo* / *OCR su
 tutte le pagine*) and per page.
 
+**Scheduling** (`src/main.js`). The current page is recognised first and the
+document is analysed right away; the other pages go through a background
+queue, one at a time: the page being read, the following pages, then the
+preceding ones. The queue is re-read after every page, so moving to a page
+not recognised yet makes it the next one, and a change of mode adds or
+removes pages. The analysis (milliseconds per page) is re-run when a page
+near the one being read is done, at least every 20 s, and once more at the
+end; the latest result wins. Until then a paragraph running into a page not
+recognised yet stays split. A page whose OCR fails is not retried.
+
 **Rasterisation** (`src/ocr.js`). pdf.js renders the page on white at 300 DPI
 (at most 5000 px on the longer side); the RGBA pixels go to Rust as a raw IPC
 body (`ocr_page`, headers `x-width`, `x-height`, `x-scale` = pixels per point).
@@ -449,8 +459,9 @@ cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
 * OCR: Latin script only; no reading of text on curved baselines; a large
   drop cap is often not detected (the first letter of the paragraph is lost);
   font weight and style are not recognised (OCR runs are never bold/italic).
-* OCR runs on the whole document before the first analysis: a long scanned
-  book takes a few seconds per page.
+* OCR takes a few seconds per page (single worker, CPU): a long scanned book
+  is readable from the start, but complete only after several minutes; the
+  results are not kept between sessions.
 * Comics: diagonal gutters and overlapping panels are not separated (one
   panel); balloons with open outlines or touching artwork of the same colour
   become free text; light text on dark boxes is not handled; the reading
