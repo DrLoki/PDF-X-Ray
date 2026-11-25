@@ -67,6 +67,7 @@ fn make_segment(page: &PageInput, layout: &PageLayout, pl: &PageLines, leaf_idx:
         font_name: font,
         alignment: align,
         rot,
+        balloon: None,
     }
 }
 
@@ -111,6 +112,7 @@ pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> Document
     let n = pages.len();
     let mut comic_layouts: Vec<Option<PageLayout>> = (0..n).map(|_| None).collect();
     let mut comic_roles: Vec<Option<Vec<&'static str>>> = vec![None; n];
+    let mut comic_containers: Vec<HashMap<String, crate::comic::ComicBalloon>> = vec![HashMap::new(); n];
     // 1. lines
     let mut page_lines: Vec<PageLines> = Vec::with_capacity(n);
     for (pi, p) in pages.iter().enumerate() {
@@ -119,6 +121,7 @@ pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> Document
                 let plan = plan_comic_page(p, c, opts.rtl);
                 comic_layouts[pi] = Some(plan.layout);
                 comic_roles[pi] = Some(plan.roles);
+                comic_containers[pi] = plan.containers;
                 page_lines.push(plan.lines);
             }
             None => page_lines.push(build_lines(&p.items)),
@@ -214,7 +217,8 @@ pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> Document
                 if si > 0 {
                     joins.push(Join { at_segment: segments.len(), kind: "column".into(), interrupted: false, dehyphenated: false });
                 }
-                let seg = make_segment(&pages[u.page_idx], &layouts[u.page_idx], &page_lines[u.page_idx], s.leaf_idx, &s.lines);
+                let mut seg = make_segment(&pages[u.page_idx], &layouts[u.page_idx], &page_lines[u.page_idx], s.leaf_idx, &s.lines);
+                seg.balloon = comic_containers[u.page_idx].get(&seg.block_id).cloned();
                 let list = leaf_pars[u.page_idx].entry(seg.block_id.clone()).or_default();
                 if !list.contains(&id) {
                     list.push(id.clone());

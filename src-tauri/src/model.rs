@@ -359,6 +359,10 @@ pub struct Segment {
     /// GianoReader uses it to rotate the translation box like the original.
     #[serde(default)]
     pub rot: u16,
+    /// Comic pages: the container of the segment (balloon, narration box,
+    /// free text, sound effect), with the shape of its inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<crate::comic::ComicBalloon>,
 }
 
 /// How two consecutive segments of the same paragraph are connected.

@@ -9,16 +9,20 @@
 //! panel. Runs outside every container become one leaf per line.
 
 use super::order::{assign_panels, balloon_order, panel_order};
-use super::{ComicLayout, KIND_BALLOON, KIND_NARRATION, KIND_SFX, KIND_TEXT};
+use super::{ComicBalloon, ComicLayout, KIND_BALLOON, KIND_NARRATION, KIND_SFX, KIND_TEXT};
 use crate::lines::{build_lines, group_rows, Line, PageLines};
 use crate::model::{Bounds, LayoutNode, PageInput, Projections, TextElement};
 use crate::xycut::{leaf_formatting, Leaf, PageLayout};
+use std::collections::HashMap;
 
 pub struct ComicPagePlan {
     pub lines: PageLines,
     pub layout: PageLayout,
     /// Role of each leaf of `layout.leaves` (the container kind).
     pub roles: Vec<&'static str>,
+    /// Container of each leaf (by leaf id): copied into the segments, so
+    /// the translation can be drawn inside the balloon.
+    pub containers: HashMap<String, ComicBalloon>,
 }
 
 fn role_of(kind: &str) -> &'static str {
@@ -33,6 +37,8 @@ fn role_of(kind: &str) -> &'static str {
 struct Container {
     bounds: Bounds,
     kind: &'static str,
+    /// Index in `comic.balloons` (None for runs outside every container).
+    src: Option<usize>,
     /// Line indices (into the page lines).
     lines: Vec<usize>,
 }
@@ -87,13 +93,13 @@ pub fn plan_comic_page(page: &PageInput, comic: &ComicLayout, rtl: bool) -> Comi
         let start = lines.len();
         lines.extend(pl.lines);
         let b = &comic.balloons[k];
-        containers.push(Container { bounds: b.bounds, kind: role_of(&b.kind), lines: (start..lines.len()).collect() });
+        containers.push(Container { bounds: b.bounds, kind: role_of(&b.kind), src: Some(k), lines: (start..lines.len()).collect() });
     }
     if !orphans.is_empty() {
         // stray marks read as text outside every container are dropped
         // (the detection drops them too: see `balloons`)
         for l in build_lines(&orphans).lines.into_iter().filter(|l| l.text.chars().filter(|c| c.is_alphanumeric()).count() >= 2) {
-            containers.push(Container { bounds: l.b, kind: KIND_TEXT, lines: vec![lines.len()] });
+            containers.push(Container { bounds: l.b, kind: KIND_TEXT, src: None, lines: vec![lines.len()] });
             lines.push(l);
         }
     }
@@ -122,6 +128,7 @@ pub fn plan_comic_page(page: &PageInput, comic: &ComicLayout, rtl: bool) -> Comi
     let pn = page.page_num;
     let mut leaves: Vec<Leaf> = Vec::new();
     let mut roles: Vec<&'static str> = Vec::new();
+    let mut leaf_containers: HashMap<String, ComicBalloon> = HashMap::new();
     let mut counter = 0usize;
     let mut make_leaf = |c: &Container, depth: usize, leaves: &mut Vec<Leaf>, roles: &mut Vec<&'static str>| -> LayoutNode {
         counter += 1;
@@ -133,6 +140,11 @@ pub fn plan_comic_page(page: &PageInput, comic: &ComicLayout, rtl: bool) -> Comi
         let formatting = leaf_formatting(&lines, &rows, &tb);
         leaves.push(Leaf { id: id.clone(), lines: ordered, bounds: tb, box_kind: None, box_id: None });
         roles.push(c.kind);
+        let container = match c.src {
+            Some(k) => ComicBalloon { lines: Vec::new(), ..comic.balloons[k].clone() },
+            None => ComicBalloon { bounds: c.bounds, kind: c.kind.to_string(), ..Default::default() },
+        };
+        leaf_containers.insert(id.clone(), container);
         LayoutNode { text: Some(text), formatting: Some(formatting), ..node(id, "leaf", tb, depth) }
     };
     let wrap = |c: &Container, depth: usize, leaf: LayoutNode, idx: usize| -> LayoutNode {
@@ -178,7 +190,7 @@ pub fn plan_comic_page(page: &PageInput, comic: &ComicLayout, rtl: bool) -> Comi
         ..node(format!("p{pn}-root"), "root", page.page_bounds, 0)
     };
     let projections = Projections { x_gaps: Vec::new(), y_gaps: Vec::new(), page_bounds: page.page_bounds };
-    ComicPagePlan { lines: PageLines { lines, drop_caps: Vec::new() }, layout: PageLayout { root, leaves, projections }, roles }
+    ComicPagePlan { lines: PageLines { lines, drop_caps: Vec::new() }, layout: PageLayout { root, leaves, projections }, roles, containers: leaf_containers }
 }
 
 #[cfg(test)]
@@ -216,9 +228,9 @@ mod tests {
         let comic = ComicLayout {
             panels: vec![b(10.0, 10.0, 180.0, 260.0), b(200.0, 10.0, 180.0, 260.0)],
             balloons: vec![
-                ComicBalloon { bounds: b(95.0, 15.0, 60.0, 30.0), kind: KIND_BALLOON.into(), lines: vec![] },
-                ComicBalloon { bounds: b(15.0, 15.0, 70.0, 30.0), kind: KIND_BALLOON.into(), lines: vec![] },
-                ComicBalloon { bounds: b(210.0, 15.0, 110.0, 20.0), kind: KIND_NARRATION.into(), lines: vec![] },
+                ComicBalloon { bounds: b(95.0, 15.0, 60.0, 30.0), kind: KIND_BALLOON.into(), ..Default::default() },
+                ComicBalloon { bounds: b(15.0, 15.0, 70.0, 30.0), kind: KIND_BALLOON.into(), ..Default::default() },
+                ComicBalloon { bounds: b(210.0, 15.0, 110.0, 20.0), kind: KIND_NARRATION.into(), ..Default::default() },
             ],
             is_comic: true,
         };
@@ -226,6 +238,10 @@ mod tests {
         let texts: Vec<String> = plan.layout.leaves.iter().map(|l| l.lines.iter().map(|&i| plan.lines.lines[i].text.clone()).collect::<Vec<_>>().join(" ")).collect();
         assert_eq!(texts, vec!["LEFT ONE SPEAKS", "RIGHT ANSWERS", "MEANWHILE...", "17"]);
         assert_eq!(plan.roles, vec![KIND_BALLOON, KIND_BALLOON, KIND_NARRATION, KIND_TEXT]);
+        // every leaf knows its container (the segments carry it to the translation overlay)
+        let kinds: Vec<&str> = plan.layout.leaves.iter().map(|l| plan.containers[&l.id].kind.as_str()).collect();
+        assert_eq!(kinds, vec![KIND_BALLOON, KIND_BALLOON, KIND_NARRATION, KIND_TEXT]);
+        assert_eq!(plan.containers[&plan.layout.leaves[0].id].bounds, b(15.0, 15.0, 70.0, 30.0));
         let rtl = plan_comic_page(&page, &comic, true);
         let first = &rtl.layout.leaves[0];
         assert_eq!(rtl.lines.lines[first.lines[0]].text, "MEANWHILE...");

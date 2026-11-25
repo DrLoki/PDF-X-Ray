@@ -239,12 +239,15 @@ boxes and images are dropped on input. A run painted twice at the same place
   }],
   "paragraphs": [{
     "id": "par5",
-    "role": "body",              // body, heading, header, footer, page-number, caption, footnote, sidebar, table, figure-text, decoration
+    "role": "body",              // body, heading, header, footer, page-number, caption, footnote, sidebar, table, figure-text, decoration;
+                                 // comic pages: balloon, narration, comic-text, sfx
     "text": "…",                 // stitched, de-hyphenated: the unit of translation
     "translatable": true,
     "segments": [{ "pageNum": 1, "blockId": "p1-b7", "bounds": {…}, "lines": [Bounds], "text": "…",
                    "charCount": 180, "fontSize": 10, "fontName": "…", "bold": false, "italic": false,
-                   "alignment": "justify", "rot": 0 }],   // rot: reading direction, 0/90/180/270
+                   "alignment": "justify", "rot": 0,      // rot: reading direction, 0/90/180/270
+                   "balloon": { "bounds": {…}, "kind": "balloon",            // comic pages only: the container
+                                "shape": [[y, x0, x1], …], "fill": "#f4efe2" } }],  // inside of the shape (rows) and its colour
     "joins": [{ "atSegment": 1, "kind": "page", "interrupted": true, "dehyphenated": false }]
   }],
   "stats": { "pageCount": 2, "paragraphCount": 11, "stitchedJoins": 2, "bodyFontSize": 10,

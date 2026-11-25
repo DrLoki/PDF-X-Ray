@@ -1140,6 +1140,20 @@ input[type=range]::-webkit-slider-thumb:hover {
 .tr-seg.selected { box-shadow: 0 0 0 2px rgba(244, 114, 182, 0.9); }
 .tr-seg.overflow { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.9); }
 
+/* comic balloons: translation drawn inside the balloon shape */
+.tr-balloon {
+  position: absolute;
+  /* same X-ray look as #pdf-canvas: the balloon is painted in the page's own
+     colours, so it must go through the same filter to blend with it */
+  filter: invert(0.92) hue-rotate(185deg) saturate(1.8) contrast(1.25) brightness(0.9);
+}
+.tr-balloon-cover { position: absolute; inset: 0; }
+.tr-balloon-line {
+  position: absolute;
+  white-space: nowrap;
+}
+.tr-balloon.selected { outline: 2px dashed rgba(244, 114, 182, 0.9); outline-offset: 2px; }
+
 .role-chip {
   --role-color: #34d399;
   display: inline-block;

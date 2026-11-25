@@ -250,6 +250,21 @@ measured in the reading frame (`fb`), where the lines run horizontally.
 GianoReader uses `rot` to lay out the translation box in the text direction
 and rotate it like the original.
 
+**Comic balloons.** On comic pages each segment carries its container
+(`balloon`: kind, bounds, `shape`, `fill`). `shape` is the inside of a
+balloon or narration box as horizontal rows `[y, x0, x1]` (leftmost and
+rightmost pixel of its background on rows about 4 px apart, letters
+included); `fill` its background colour. The overlay paints the shape with
+that colour (a polygon through the row ends, hiding the original lettering)
+and wraps the translation inside it (`fitInShape` in `src/translate.js`): n
+lines centred on the original text, each as wide as the shape at its height
+(the narrowest of its top, middle and bottom), the fewest lines that hold
+every word; the font shrinks by 7 % steps down to 45 % of the lettering.
+Balloons are centred, narration boxes left-aligned; the ink is dark or light
+against the fill. A translation that does not fit even at 45 %, free text and
+sound effects fall back to the rectangle of the segment. In the app the
+balloons go through the same X-ray filter as the page, to blend with it.
+
 ## OCR (`ocr/`, `src/ocr.js`)
 
 Pages whose text is only in the pixels (scans, image-only pages) go through
@@ -394,7 +409,8 @@ balloons / narration boxes (`balloon` / `narration`, bordered) → leaf; free
 text and sound effects are leaves of the panel. Leaf roles: `balloon`,
 `narration`, `comic-text`, `sfx` (all translatable). Text runs are split by
 container before lines are built, so balloons side by side never share a
-line.
+line. The segments of a comic page carry their container (with the shape of
+balloons and narration boxes, see [Translation overlay](#8-translation-overlay-reflowrs-srctranslatejs)).
 
 OCR boxes of comic lettering are taller than the line pitch: the runs are
 thinned to 1.6× the distance to the neighbouring line, so consecutive lines
@@ -473,4 +489,6 @@ cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
   panel); balloons with open outlines or touching artwork of the same colour
   become free text; light text on dark boxes is not handled; the reading
   direction is a document setting (no automatic RTL detection); titles drawn
-  as lettering are read as sound effects or balloons.
+  as lettering are read as sound effects or balloons (and their artwork is
+  painted over by the translation overlay); the translation font is a system
+  comic face (Comic Sans MS), not the original lettering.

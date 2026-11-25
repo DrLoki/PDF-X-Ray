@@ -352,13 +352,15 @@ pub fn detect_balloons(img: &RgbImage, lines: &[OcrLine], panels: &[Bounds]) -> 
 
     let mut out: Vec<BalloonDraft> = Vec::new();
     let alnum = |ls: &[usize]| -> usize { ls.iter().map(|&i| lines[i].text.chars().filter(|c| c.is_alphanumeric()).count()).sum() };
-    for (ls, area, bounds, _, _) in containers.into_iter().flatten() {
+    for (k, c) in containers.into_iter().enumerate() {
+        let Some((ls, area, bounds, _, bg)) = c else { continue };
         if alnum(&ls) < 2 {
             continue;
         }
         let rect = area as f32 / bounds.area().max(1.0);
         let kind = if rect >= RECT_FILL { KIND_NARRATION } else { KIND_BALLOON };
-        out.push(BalloonDraft { bounds, kind, lines: sorted(lines, ls) });
+        let shape = shape_rows(&label, w as usize, k as u32 + 1, &bounds);
+        out.push(BalloonDraft { bounds, kind, lines: sorted(lines, ls), shape, fill: Some(bg) });
     }
     // free text: sound effects are much bigger than the dialogue
     let mut dialogue_h: Vec<f32> = out.iter().flat_map(|b| b.lines.iter().map(|&i| lines[i].bounds.h)).collect();
@@ -376,9 +378,33 @@ pub fn detect_balloons(img: &RgbImage, lines: &[OcrLine], panels: &[Bounds]) -> 
         hs.sort_by(|a, b| a.total_cmp(b));
         let bh = hs[hs.len() / 2];
         let kind = if ref_h > 0.0 && bh >= ref_h * SFX_HEIGHT { KIND_SFX } else { KIND_TEXT };
-        out.push(BalloonDraft { bounds, kind, lines: sorted(lines, ls) });
+        out.push(BalloonDraft { bounds, kind, lines: sorted(lines, ls), shape: Vec::new(), fill: None });
     }
     out
+}
+
+/// Rows `[y, x0, x1]` of the region labelled `id` inside `bounds`: the
+/// leftmost and rightmost pixel of the region on evenly spaced rows (about
+/// one every 4 px, 8 to 40 rows), so the letters (holes in the region) are
+/// inside the extent.
+fn shape_rows(label: &[u32], w: usize, id: u32, bounds: &Bounds) -> Vec<[f32; 3]> {
+    let (x0, x1) = (bounds.x.max(0.0) as usize, (bounds.x1() as usize).min(w));
+    let (y0, y1) = (bounds.y.max(0.0) as usize, bounds.y1() as usize);
+    if y1 <= y0 || x1 <= x0 {
+        return Vec::new();
+    }
+    let n = ((y1 - y0) / 4).clamp(8, 40).min(y1 - y0);
+    let mut rows = Vec::with_capacity(n);
+    for k in 0..n {
+        let y = if n == 1 { y0 } else { y0 + k * (y1 - 1 - y0) / (n - 1) };
+        let row = &label[y * w..y * w + w];
+        let first = (x0..x1).find(|&x| row[x] == id);
+        let last = (x0..x1).rev().find(|&x| row[x] == id);
+        if let (Some(a), Some(b)) = (first, last) {
+            rows.push([y as f32 + 0.5, a as f32, b as f32 + 1.0]);
+        }
+    }
+    rows
 }
 
 fn sorted(lines: &[OcrLine], mut ls: Vec<usize>) -> Vec<usize> {
@@ -450,6 +476,15 @@ mod tests {
         assert_eq!(out[0].kind, KIND_BALLOON);
         assert_eq!(out[0].lines, vec![0, 1]);
         assert!(out[0].bounds.w > 250.0 && out[0].bounds.w < 310.0, "{:?}", out[0].bounds);
+        // the shape follows the ellipse: wide in the middle, narrow at the ends
+        let shape = &out[0].shape;
+        assert!(shape.len() >= 8, "{shape:?}");
+        let width = |r: &[f32; 3]| r[2] - r[1];
+        let mid = shape.iter().min_by(|a, b| (a[0] - 150.0).abs().total_cmp(&(b[0] - 150.0).abs())).unwrap();
+        assert!(width(mid) > 260.0, "{mid:?}");
+        assert!(width(&shape[0]) < width(mid) * 0.6 && width(shape.last().unwrap()) < width(mid) * 0.6);
+        assert!(out[0].fill.is_some_and(|c| c.iter().all(|&v| v > 240)));
+        assert!(out[1].shape.is_empty() && out[1].fill.is_none());
         assert_eq!(out[1].kind, KIND_SFX);
         assert_eq!(out[2].kind, KIND_TEXT);
     }

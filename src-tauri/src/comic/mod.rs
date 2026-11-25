@@ -38,10 +38,12 @@ pub struct BalloonDraft {
     pub bounds: Bounds,
     pub kind: &'static str,
     pub lines: Vec<usize>,
+    pub shape: Vec<[f32; 3]>,
+    pub fill: Option<[u8; 3]>,
 }
 
 /// A text container found on a comic page.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ComicBalloon {
     /// The container (inside of the balloon / box); for free text, the
@@ -53,6 +55,15 @@ pub struct ComicBalloon {
     /// assigns text runs geometrically).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<usize>,
+    /// Inside of a balloon / narration box, as horizontal rows `[y, x0, x1]`
+    /// top to bottom (the extent of the container's background on that
+    /// row, letters included). Used to erase the original lettering and to
+    /// wrap a translation inside the shape. Empty for free text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<[f32; 3]>,
+    /// Background colour of the container, `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
 }
 
 /// Panels and text containers of a page (unordered: the pipeline orders
@@ -73,7 +84,11 @@ impl ComicLayout {
         let sc = |b: &Bounds| Bounds { x: b.x * s, y: b.y * s, w: b.w * s, h: b.h * s };
         ComicLayout {
             panels: self.panels.iter().map(sc).collect(),
-            balloons: self.balloons.iter().map(|b| ComicBalloon { bounds: sc(&b.bounds), ..b.clone() }).collect(),
+            balloons: self
+                .balloons
+                .iter()
+                .map(|b| ComicBalloon { bounds: sc(&b.bounds), shape: b.shape.iter().map(|r| [r[0] * s, r[1] * s, r[2] * s]).collect(), ..b.clone() })
+                .collect(),
             is_comic: self.is_comic,
         }
     }
@@ -86,7 +101,16 @@ pub fn analyze(img: &RgbImage, lines: &[OcrLine]) -> ComicLayout {
     let is_comic = looks_like_comic(&panels, &drafts, lines.len(), img.width() as f32 * img.height() as f32);
     ComicLayout {
         panels,
-        balloons: drafts.into_iter().map(|d| ComicBalloon { bounds: d.bounds, kind: d.kind.to_string(), lines: d.lines }).collect(),
+        balloons: drafts
+            .into_iter()
+            .map(|d| ComicBalloon {
+                bounds: d.bounds,
+                kind: d.kind.to_string(),
+                lines: d.lines,
+                shape: d.shape,
+                fill: d.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+            })
+            .collect(),
         is_comic,
     }
 }
@@ -112,7 +136,7 @@ mod tests {
     use super::*;
 
     fn d(kind: &'static str, lines: usize) -> BalloonDraft {
-        BalloonDraft { bounds: Bounds::default(), kind, lines: (0..lines).collect() }
+        BalloonDraft { bounds: Bounds::default(), kind, lines: (0..lines).collect(), shape: vec![], fill: None }
     }
 
     #[test]
@@ -133,5 +157,7 @@ mod tests {
         let l = ComicLayout { panels: vec![Bounds { x: 10.0, y: 20.0, w: 30.0, h: 40.0 }], balloons: vec![], is_comic: true };
         let s = l.scaled(0.5);
         assert_eq!(s.panels[0], Bounds { x: 5.0, y: 10.0, w: 15.0, h: 20.0 });
+        let l = ComicLayout { balloons: vec![ComicBalloon { shape: vec![[10.0, 20.0, 40.0]], ..Default::default() }], ..Default::default() };
+        assert_eq!(l.scaled(0.5).balloons[0].shape, vec![[5.0, 10.0, 20.0]]);
     }
 }

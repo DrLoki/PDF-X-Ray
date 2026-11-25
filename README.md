@@ -42,6 +42,7 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
    - The models (12 MB) are downloaded once, on first use and only after confirmation, then verified by SHA-256.
    - OCR snapshots save the image given to the engine and a reference transcription; `cli_analyze --eval-ocr` measures CER / WER of the current engine on them.
    - **Comics**: on scanned comic pages the panels and the text containers (speech balloons, narration boxes, free text, sound effects) are detected on the page image; each container becomes one translation unit, in comic reading order (left to right, or right to left for manga-style books). Detected automatically, or forced per document / page (*Fumetto*); `cli_analyze --eval-comic` scores comic snapshots.
+   - The translation of a balloon replaces its lettering: the inside of the balloon is painted with its colour and the text is wrapped inside the balloon shape, shrinking when needed. The shape and colour of each balloon are exported with the segments (document JSON) for GianoReader.
 
 7. **Bi-directional Synced Interlock & Inspector**:
    - Hovering/clicking a block on the canvas highlights it in the layout DOM tree and vice versa; the inspector shows role, reading order, font, alignment, the block text and the logical paragraphs it belongs to (full stitched text and translation).
