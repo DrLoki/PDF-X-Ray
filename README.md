@@ -87,6 +87,7 @@ Full details: [`docs/layout-pipeline.md`](docs/layout-pipeline.md).
    ```powershell
    npm.cmd install
    ```
+   This also copies pdf.js (library, worker, WebAssembly image decoders) from `node_modules/pdfjs-dist` into `src/assets/pdfjs/` (`tools/vendor_pdfjs.mjs`; it runs again before `tauri dev` / `tauri build`, and with `npm run vendor:pdfjs`).
 
 ---
 

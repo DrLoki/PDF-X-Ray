@@ -6,6 +6,16 @@ import { rasterizePage, recognizeCanvas, formatBytes, ocrSummary, LOW_CONF, OCR_
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdfjs/pdf.worker.min.mjs';
 
+// Resources pdf.js 6 loads on demand (copied by tools/vendor_pdfjs.mjs).
+// Without `wasmUrl` CCITT fax / JBIG2 (black-and-white scans) and JPEG 2000
+// images are not decoded and the page renders blank; `iccUrl` serves the
+// CMYK profile. Absolute URLs: the worker resolves them on its own base.
+const pdfjsAsset = (dir) => new URL(`./assets/pdfjs/${dir}/`, location.href).href;
+const PDFJS_RESOURCES = {
+  wasmUrl: pdfjsAsset('wasm'),
+  iccUrl: pdfjsAsset('iccs'),
+};
+
 // Colours per block role (overlay, DOM tree, paragraph list).
 const ROLE_COLORS = {
   body: '#34d399',
@@ -412,7 +422,7 @@ async function loadPDFFile(file) {
     const data = await file.arrayBuffer();
     // pdf.js 6: only the loading task can be destroyed (PDFDocumentProxy.destroy was removed).
     // Open the new document first, then release the old one, so a failed open keeps the current file.
-    const task = pdfjsLib.getDocument({ data });
+    const task = pdfjsLib.getDocument({ data, ...PDFJS_RESOURCES });
     const doc = await task.promise;
     if (token !== state.loadToken) { task.destroy(); return; }
     const oldTask = state.loadingTask;

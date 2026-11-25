@@ -25,3 +25,6 @@ dist-ssr
 
 src-tauri/Cargo.lock
 package-lock.json
+
+# pdf.js, copied from node_modules/pdfjs-dist by tools/vendor_pdfjs.mjs
+src/assets/pdfjs/

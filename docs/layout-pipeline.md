@@ -278,7 +278,14 @@ near the one being read is done, at least every 20 s, and once more at the
 end; the latest result wins. Until then a paragraph running into a page not
 recognised yet stays split. A page whose OCR fails is not retried.
 
-**Rasterisation** (`src/ocr.js`). pdf.js renders the page on white at 300 DPI
+**Rasterisation** (`src/ocr.js`). pdf.js 6 decodes CCITT fax and JBIG2 images
+(black-and-white scans) and JPEG 2000 with WebAssembly modules loaded through
+`wasmUrl`: `tools/vendor_pdfjs.mjs` copies them (with the library, its
+worker and the CMYK profile in `iccs/`) from `node_modules/pdfjs-dist` into
+`src/assets/pdfjs/` on `npm install` and before `tauri dev` / `tauri build`,
+so they always match the installed version (the copies are not versioned).
+Their URLs are passed to `getDocument`; without them those pages render
+blank and the OCR finds nothing. pdf.js renders the page on white at 300 DPI
 (at most 5000 px on the longer side); the RGBA pixels go to Rust as a raw IPC
 body (`ocr_page`, headers `x-width`, `x-height`, `x-scale` = pixels per point).
 
