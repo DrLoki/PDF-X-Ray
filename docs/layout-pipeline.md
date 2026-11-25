@@ -28,6 +28,8 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 | `flow.rs` | Paragraph split inside blocks, Tagged-PDF units, stitching |
 | `reflow.rs` | Distribution of a translated paragraph over its segments |
 | `pipeline.rs` | Orchestration, statistics |
+| `ocr/` | Pages without a text layer: classification, PaddleOCR engine on `rten`, model download, OCR metrics (see [OCR](#ocr-ocr-srcocrjs)) |
+| `comic/` | Comic pages: panels, balloons / narration boxes / free text / sound effects, comic reading order (see [Comics](#comics-comic)) |
 
 ---
 
@@ -248,6 +250,177 @@ measured in the reading frame (`fb`), where the lines run horizontally.
 GianoReader uses `rot` to lay out the translation box in the text direction
 and rotate it like the original.
 
+**Comic balloons.** On comic pages each segment carries its container
+(`balloon`: kind, bounds, `shape`, `fill`). `shape` is the inside of a
+balloon or narration box as horizontal rows `[y, x0, x1]` (leftmost and
+rightmost pixel of its background on rows about 4 px apart, letters
+included); `fill` its background colour. The overlay paints the shape with
+that colour (a polygon through the row ends, hiding the original lettering)
+and wraps the translation inside it (`fitInShape` in `src/translate.js`): n
+lines centred on the original text, each as wide as the shape at its height
+(the narrowest of its top, middle and bottom), the fewest lines that hold
+every word; the font shrinks by 7 % steps down to 45 % of the lettering.
+Balloons are centred, narration boxes left-aligned; the ink is dark or light
+against the fill. A translation that does not fit even at 45 %, free text and
+sound effects fall back to the rectangle of the segment. In the app the
+balloons go through the same X-ray filter as the page, to blend with it.
+
+## OCR (`ocr/`, `src/ocr.js`)
+
+Pages whose text is only in the pixels (scans, image-only pages) go through
+OCR; the recognised lines become ordinary `TextElement`s, so everything from
+§2 on is unchanged.
+
+```
+extract.js ─► classify_pages ─► (scan) rasterise 300 DPI ─► ocr_page ─► TextElements ─► pipeline
+                               (text) text layer as is
+```
+
+**Classification** (`ocr/classify.rs`). A page is a `scan` when its text layer
+has fewer than 40 visible characters and images cover at least half of it
+(union of the image boxes, sampled on a 48 × 48 grid, so image strips add
+up). Scans that already carry a text layer (an invisible OCR layer) keep it.
+The UI can override per document (*Automatico* / *Strato di testo* / *OCR su
+tutte le pagine*) and per page.
+
+**Scheduling** (`src/main.js`). The current page is recognised first and the
+document is analysed right away; the other pages go through a background
+queue, one at a time: the page being read, the following pages, then the
+preceding ones. The queue is re-read after every page, so moving to a page
+not recognised yet makes it the next one, and a change of mode adds or
+removes pages. The analysis (milliseconds per page) is re-run when a page
+near the one being read is done, at least every 20 s, and once more at the
+end; the latest result wins. Until then a paragraph running into a page not
+recognised yet stays split. A page whose OCR fails is not retried.
+
+**Rasterisation** (`src/ocr.js`). pdf.js 6 decodes CCITT fax and JBIG2 images
+(black-and-white scans) and JPEG 2000 with WebAssembly modules loaded through
+`wasmUrl`: `tools/vendor_pdfjs.mjs` copies them (with the library, its
+worker and the CMYK profile in `iccs/`) from `node_modules/pdfjs-dist` into
+`src/assets/pdfjs/` on `npm install` and before `tauri dev` / `tauri build`,
+so they always match the installed version (the copies are not versioned).
+Their URLs are passed to `getDocument`; without them those pages render
+blank and the OCR finds nothing. pdf.js renders the page on white at 300 DPI
+(at most 5000 px on the longer side); the RGBA pixels go to Rust as a raw IPC
+body (`ocr_page`, headers `x-width`, `x-height`, `x-scale` = pixels per point).
+
+**Engine** (`ocr/paddle.rs`, PaddleOCR PP-OCRv5 on `rten`, pure Rust, CPU):
+
+1. *Detection* (`PP-OCRv5_mobile_det`, DBNet): the image is resized to a longer
+   side of 1600 px (multiple of 32), normalised with the ImageNet mean/std in
+   BGR. The probability map is thresholded at 0.3; each connected region with
+   mean probability ≥ 0.6 becomes a box, grown by the DB unclip distance
+   (area × 1.5 / perimeter), since the model is trained on shrunk regions.
+2. *Recognition* (`latin_PP-OCRv5_mobile_rec`, CTC, 836 characters including
+   accented Latin letters): each box is cropped from the full-resolution image,
+   resized to height 48, normalised to [−1, 1], batched by aspect ratio and
+   decoded greedily (blank 0, dictionary, space). Boxes 1.5 × taller than wide
+   are also read rotated by ±90°; the most confident reading wins and sets
+   `rot` (vertical credits). Lines below 0.5 confidence are dropped.
+3. *Word boxes* come from the CTC time steps of each character.
+
+**To text runs** (`ocr::to_text_elements`). Box heights depend on the letters
+of a line (no ascenders → lower box), which the paragraph heuristics would
+read as size and leading changes. Lines are grouped around the modes of their
+thickness (±20 %, weighted by characters) and every line gets its group's
+median thickness, centred on the line; the font size is thickness / 1.3
+(calibrated on the text layer of digital pages). A line is split into several
+runs where two words are farther apart than the line height, so a box that
+crosses a gutter does not glue two columns. Runs carry `source: "ocr"` and
+`conf`; the **Words** overlay shows them in violet, orange below 0.8.
+
+**Models** (`ocr/models.rs`). Not in the installer: on first use the app
+shows the files (12.3 MB), their source and the destination folder, and
+downloads them only after confirmation (`ocr_download_models`, progress
+events). Mirrors: the project's GitHub release `models-v1`, then the official
+PaddlePaddle repositories on Hugging Face. Every file is checked against its
+SHA-256 before it is renamed into place. Recognition never uses the network.
+`$PDFXRAY_MODEL_DIR` overrides the folder (development, tests).
+
+**Measuring the OCR**. OCR snapshots store the exact image given to the
+engine and a reference transcription; `cli_analyze --eval-ocr` re-runs the
+current engine and reports CER / WER (`ocr/metrics.rs`: lines paired by edit
+distance regardless of order, typography normalised). See below and
+[`cli-analyze.md`](cli-analyze.md#ocr---ocr---eval-ocr).
+
+Measured on a 300 DPI rendering of a two-column RPG page (the text layer as
+reference): CER 0.15 %, WER 1.1 %, 3.8 s per page in a release build
+(detection 0.5 s, recognition 3.2 s); the layout from the OCR runs matches the
+one from the text layer (same paragraphs, body size 9 pt).
+
+## Comics (`comic/`)
+
+Comic pages are scans (OCR) whose text lives in containers drawn on the
+artwork. The detection runs on the same raster as the OCR, right after it
+(`ocr_page`, about 0.3–0.5 s at 300 DPI), and returns a `ComicLayout` (panels
+and containers, PDF points) that the frontend stores in `PageInput.comic`.
+With a `comic` layout the pipeline skips XY-Cut and roles for that page
+(`comic/layout.rs`): one leaf per container, one translation unit each, never
+stitched.
+
+**Panels** (`comic/panels.rs`, on a ~1000 px work grid):
+
+1. background = median colour of the page border (white or yellowed paper);
+2. recursive XY-cut: a row/column is a gutter when ≥ 88 % of it is background
+   (a foot, a balloon or a title may cross it); a run of such rows is a cut if
+   part of it is connected to the page border, or if it is thin (≤ 3.5 % of
+   the page: pages framed as a whole) — a white sky inside a framed panel is
+   neither. Rows first (tiers), then columns;
+3. a cell that cannot be cut (round panels overlapping their neighbours,
+   gutters that stop half way) is split into the regions of artwork separated
+   by background, when there are several large ones;
+4. cells smaller than 8 % × 5 % of the page are dropped.
+
+**Containers** (`comic/balloons.rs`, full resolution, slightly blurred so
+halftone dots do not stop a fill):
+
+1. OCR lines are grouped into text blocks (stacked, small leading, similar
+   height);
+2. for each line, the background behind its letters (most frequent colour of
+   the lighter half of the line box) is flood-filled from the line; the
+   fill may cross the boxes of the block's lines on the same background
+   (tight leading leaves no path between lines);
+3. the fill *leaks* when it reaches the page edge, covers ≥ 60 % of its panel
+   (the panel background), or is more than 4× the padded text box (a
+   spotlight, a wall): the line is free text. Otherwise it is a container —
+   a **narration** box when the region fills ≥ 88 % of its box, a **balloon**
+   otherwise;
+4. lines whose fills cover the same region, or touch within one block on the
+   same background, or lie inside another container (bold words whose
+   background reads as ink) are one container;
+5. free text is grouped into blocks; blocks with letters ≥ 1.9× the dialogue
+   are **sfx**, the others **comic-text**; text with fewer than two letters
+   or digits is dropped (artwork read as text).
+
+**Comic page or not** (automatic mode): balloons hold at least half of the
+lines (≥ 2 balloons), or ≥ 2 panels covering 40 % of the page with at least one
+balloon. A prose page has no panels (the white leading cuts its lines apart)
+and its fills leak into the margins.
+
+**Reading order** (`comic/order.rs`, in the pipeline, so *Lettura fumetti*
+re-orders without a new detection): panels by recursive cuts on their boxes —
+tiers top to bottom, then columns left to right (right to left with
+`rtl`); containers outside every panel take part as their own slots. Inside
+a panel: the topmost container, unless a container on the reading side
+starts above its middle ("top-left first").
+
+**Layout tree**: root (`containerKind: "comic"`) → panels (`panel`) →
+balloons / narration boxes (`balloon` / `narration`, bordered) → leaf; free
+text and sound effects are leaves of the panel. Leaf roles: `balloon`,
+`narration`, `comic-text`, `sfx` (all translatable). Text runs are split by
+container before lines are built, so balloons side by side never share a
+line. The segments of a comic page carry their container (with the shape of
+balloons and narration boxes, see [Translation overlay](#8-translation-overlay-reflowrs-srctranslatejs)).
+
+OCR boxes of comic lettering are taller than the line pitch: the runs are
+thinned to 1.6× the distance to the neighbouring line, so consecutive lines
+are not read as one row (prose is unaffected: its pitch is larger).
+
+Measured on seven public-domain golden-age pages (Wikimedia Commons, ~140 DPI
+scans): grid layouts give the right panels and order; diagonal gutters and
+panels overlapping in a round frame give a single panel (the containers are
+still read top-left first). Detection takes 30–80 ms per page at that size.
+
 ## Tuning with snapshots
 
 Automatic thresholds are heuristics; the way to improve them is to collect
@@ -269,6 +442,18 @@ pages where manual settings do better and measure.
 4. Copy representative snapshots to `src-tauri/tests/snapshots/`; adding
    `"minAutoScore": 0.95` to one turns it into a regression test
    (`tests/snapshots.rs`).
+5. On OCR pages the dialog also asks for the **reference text**: correct the
+   recognised lines in the text box, confirm them as correct, or (for a
+   digital page forced to OCR from *Questa pagina*) use the PDF text layer —
+   a free reference that makes any digital PDF a test set for the OCR. The
+   image given to the OCR is saved as `<snapshot>_ocr.png`;
+   `cli_analyze --eval-ocr` scores it, and `"maxOcrCer"` in the `ocr` section
+   locks a page against regressions (copy the PNG along with the JSON).
+6. On comic pages the reference blocks are the containers in their reading
+   order. `cli_analyze --eval-comic` re-runs the panel/container detection on
+   the saved image with the saved OCR lines (OCR changes do not interfere) and
+   reports grouping F1 and order agreement for the stored and the current
+   detection; `"minAutoScore"` locks the grouping.
 
 ## Tests
 
@@ -292,4 +477,18 @@ cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
   (no dictionary): a real compound split at a line end loses its hyphen.
 * Tables are detected only from ruled grids; borderless tables are segmented
   as text blocks.
-* Text in vector outlines or scanned pages is not visible to the engine (no OCR).
+* Text drawn as vector outlines (no text layer, no image) is not detected as
+  needing OCR: force OCR on those pages from the interface.
+* OCR: Latin script only; no reading of text on curved baselines; a large
+  drop cap is often not detected (the first letter of the paragraph is lost);
+  font weight and style are not recognised (OCR runs are never bold/italic).
+* OCR takes a few seconds per page (single worker, CPU): a long scanned book
+  is readable from the start, but complete only after several minutes; the
+  results are not kept between sessions.
+* Comics: diagonal gutters and overlapping panels are not separated (one
+  panel); balloons with open outlines or touching artwork of the same colour
+  become free text; light text on dark boxes is not handled; the reading
+  direction is a document setting (no automatic RTL detection); titles drawn
+  as lettering are read as sound effects or balloons (and their artwork is
+  painted over by the translation overlay); the translation font is a system
+  comic face (Comic Sans MS), not the original lettering.

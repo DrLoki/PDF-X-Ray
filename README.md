@@ -36,14 +36,22 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
    - Each logical paragraph is a translation unit (export: *Unità di traduzione · JSON*; import the same file with the `translation` fields filled, or `{ "par12": "…" }`).
    - The translated text is re-distributed over the original pieces of the paragraph (proportional to their length, cut at sentence/word boundaries) and fitted into each box. **Pseudo** generates a +30 % pseudo-translation to test the layout without a translation engine.
 
-6. **Bi-directional Synced Interlock & Inspector**:
+6. **OCR for scanned pages**:
+   - Pages without a text layer (scans, image-only pages) are detected automatically and recognised with **PaddleOCR PP-OCRv5** (Latin script, accents included) running in Rust on `rten`, entirely offline. The recognised lines feed the same layout pipeline as a text layer.
+   - Override per document or per page (*Automatico* / *Strato di testo* / *OCR*); uncertain words are highlighted in the **Words** overlay. The current page is recognised first and can be read at once; the rest of the document is recognised in the background, following the page you are reading.
+   - The models (12 MB) are downloaded once, on first use and only after confirmation, then verified by SHA-256.
+   - OCR snapshots save the image given to the engine and a reference transcription; `cli_analyze --eval-ocr` measures CER / WER of the current engine on them.
+   - **Comics**: on scanned comic pages the panels and the text containers (speech balloons, narration boxes, free text, sound effects) are detected on the page image; each container becomes one translation unit, in comic reading order (left to right, or right to left for manga-style books). Detected automatically, or forced per document / page (*Fumetto*); `cli_analyze --eval-comic` scores comic snapshots.
+   - The translation of a balloon replaces its lettering: the inside of the balloon is painted with its colour and the text is wrapped inside the balloon shape, shrinking when needed. The shape and colour of each balloon are exported with the segments (document JSON) for GianoReader.
+
+7. **Bi-directional Synced Interlock & Inspector**:
    - Hovering/clicking a block on the canvas highlights it in the layout DOM tree and vice versa; the inspector shows role, reading order, font, alignment, the block text and the logical paragraphs it belongs to (full stitched text and translation).
 
-7. **Snapshots for heuristic tuning**:
+8. **Snapshots for heuristic tuning**:
    - **📸 Snapshot** saves the page data, the settings, the results with the current and with the automatic thresholds (including per-node diagnostics: thresholds, largest gaps, decisions), your verdict, a note and a PNG of the view to `Documents/PDF-X-Ray/snapshots`.
    - `cli_analyze --eval <folder>` scores the automatic settings against the validated segmentations, so heuristic changes can be measured across all annotated pages.
 
-8. **Export**:
+9. **Export**:
    - Page layout tree as **JSON**, **XML** or **HTML**; whole document result as JSON; logical paragraphs as text; translation units as JSON.
 
 ---
@@ -62,6 +70,8 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 6. **Paragraphs & stitching** (`flow.rs`): paragraph split inside blocks, continuation across blocks/pages, de-hyphenation.
 7. **Re-flow** (`reflow.rs`): translated text distributed over the paragraph's segments.
 
+Scanned pages first go through the OCR (`ocr/`): classification, 300 DPI rasterisation with pdf.js, PaddleOCR detection + recognition, recognised lines → text runs. Comic pages (`comic/`) are then laid out from their panels and balloons instead of XY-Cut.
+
 Full details: [`docs/layout-pipeline.md`](docs/layout-pipeline.md).
 
 ---
@@ -78,6 +88,7 @@ Full details: [`docs/layout-pipeline.md`](docs/layout-pipeline.md).
    ```powershell
    npm.cmd install
    ```
+   This also copies pdf.js (library, worker, WebAssembly image decoders) from `node_modules/pdfjs-dist` into `src/assets/pdfjs/` (`tools/vendor_pdfjs.mjs`; it runs again before `tauri dev` / `tauri build`, and with `npm run vendor:pdfjs`).
 
 ---
 

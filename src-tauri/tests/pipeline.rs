@@ -80,7 +80,7 @@ fn line(text: &str, x: f32, y: f32, w: f32, fs: f32) -> TextElement {
 }
 
 fn page(num: u32, items: Vec<TextElement>, images: Vec<Bounds>) -> PageInput {
-    PageInput { page_num: num, page_bounds: Bounds { x: 0.0, y: 0.0, w: 612.0, h: 792.0 }, items, bordered_boxes: vec![], images }
+    PageInput { page_num: num, page_bounds: Bounds { x: 0.0, y: 0.0, w: 612.0, h: 792.0 }, items, bordered_boxes: vec![], images, comic: None }
 }
 
 fn synthetic_doc() -> Vec<PageInput> {
@@ -239,6 +239,7 @@ fn decorated_page() -> PageInput {
         items,
         bordered_boxes: vec![edge],
         images: vec![edge, Bounds { x: 418.0, y: 66.0, w: 175.0, h: 690.0 }],
+        comic: None,
     }
 }
 
@@ -304,7 +305,7 @@ fn rotated_text_reads_in_order_and_stays_out_of_columns() {
     items.push(credit("GORDON M", 192.0, 40.0));
     items.push(credit("C", 188.0, 4.0));
     items.push(credit("ALPIN", 167.0, 21.0));
-    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![] };
+    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![], comic: None };
     let r = analyze(&[page]);
     let caption = find(&r, "Life in Paris");
     assert!(caption.text.contains("Life in Paris: Aristos enjoy their day as the poor starve."), "{:?}", caption.text);
@@ -323,7 +324,7 @@ fn doubled_runs_are_read_once() {
         let (x, t) = if k == 0 { (95.0, "s you step into the world of Roshar,") } else { (95.0, "you start by creating the character") };
         items.push(TextElement { text: t.into(), x, y: 110.0 + 13.0 * k as f32, width: 180.0, height: 11.0, font_size: 9.5, ..Default::default() });
     }
-    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![] };
+    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![], comic: None };
     let r = analyze(&[page]);
     assert!(r.paragraphs.iter().any(|p| p.text.starts_with("As you step")), "{:#?}", r.paragraphs.iter().map(|p| &p.text).collect::<Vec<_>>());
     assert_eq!(r.stats.input_chars, r.stats.output_chars);
@@ -341,7 +342,7 @@ fn segments_carry_their_rotation() {
     items.push(cap("second line of the caption.", 296.0));
     items.push(cap("First line of a rotated caption", 308.0));
     items.push(TextElement { text: "Photo credit".into(), x: 40.0, y: 150.0, width: 9.0, height: 60.0, font_size: 8.0, rot: Some(270.0), ..Default::default() });
-    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![] };
+    let page = PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 400.0, h: 600.0 }, items, bordered_boxes: vec![], images: vec![], comic: None };
     let r = analyze(&[page]);
     let rot_of = |prefix: &str| find(&r, prefix).segments.iter().map(|s| s.rot).collect::<Vec<_>>();
     assert_eq!(rot_of("Body line 0"), vec![0]);

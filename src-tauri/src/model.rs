@@ -104,6 +104,13 @@ pub struct TextElement {
     /// older inputs.
     #[serde(default)]
     pub rot: Option<f32>,
+    /// `ocr` when the run was recognised from the page image; absent for
+    /// runs of the PDF text layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// OCR recognition confidence of the run (0–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conf: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +127,10 @@ pub struct PageInput {
     /// Placed raster images (used to detect captions).
     #[serde(default)]
     pub images: Vec<Bounds>,
+    /// Panels and text containers of a comic page (PDF points). When set,
+    /// the page is laid out from them instead of XY-Cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comic: Option<crate::comic::ComicLayout>,
 }
 
 impl PageInput {
@@ -148,6 +159,7 @@ impl PageInput {
             items,
             bordered_boxes: self.bordered_boxes.iter().filter(|b| b.is_finite()).copied().collect(),
             images: self.images.iter().filter(|b| b.is_finite()).copied().collect(),
+            comic: self.comic.clone(),
         }
     }
 }
@@ -183,6 +195,9 @@ pub struct AnalysisOptions {
     /// Stitch paragraphs across column / page / box interruptions.
     #[serde(default = "default_true")]
     pub stitch: bool,
+    /// Comic pages read right to left (manga-style books).
+    #[serde(default)]
+    pub rtl: bool,
 }
 
 fn default_strategy() -> String {
@@ -203,6 +218,7 @@ impl Default for AnalysisOptions {
             manual: None,
             use_tags: true,
             stitch: true,
+            rtl: false,
         }
     }
 }
@@ -257,6 +273,9 @@ pub struct LayoutNode {
     /// candidate gaps, decision. Used by snapshots to tune the heuristics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diag: Option<CutDiag>,
+    /// Comic pages: `comic` (root), `panel`, `balloon` or `narration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -340,6 +359,10 @@ pub struct Segment {
     /// GianoReader uses it to rotate the translation box like the original.
     #[serde(default)]
     pub rot: u16,
+    /// Comic pages: the container of the segment (balloon, narration box,
+    /// free text, sound effect), with the shape of its inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<crate::comic::ComicBalloon>,
 }
 
 /// How two consecutive segments of the same paragraph are connected.

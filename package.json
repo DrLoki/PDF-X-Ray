@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
+    "vendor:pdfjs": "node tools/vendor_pdfjs.mjs",
+    "postinstall": "node tools/vendor_pdfjs.mjs",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "devDependencies": {

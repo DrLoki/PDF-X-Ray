@@ -4,15 +4,17 @@
   "version": "0.2.0",
   "identifier": "com.drloki.pdfxray",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../src",
+    "beforeDevCommand": "npm run vendor:pdfjs",
+    "beforeBuildCommand": "npm run vendor:pdfjs"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
         "title": "PDF X-Ray",
-        "width": 1350,
-        "height": 880,
+        "width": 1680,
+        "height": 940,
         "resizable": true
       }
     ],

@@ -88,10 +88,11 @@ body, html {
 
 /* 3. App Core Structure Layout */
 .app-container {
-  --left-width: 320px;
-  --right-width: 340px;
+  --left-width: 400px;
+  --engine-width: 330px;
+  --right-width: 380px;
   display: grid;
-  grid-template-columns: var(--left-width) 1fr var(--right-width);
+  grid-template-columns: var(--left-width) minmax(0, 1fr) var(--engine-width) var(--right-width);
   width: 100%;
   height: 100vh;
   padding: var(--panel-gap);
@@ -707,16 +708,14 @@ body, html {
   flex-shrink: 0;
 }
 
-.collapsible-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  user-select: none;
+/* the Layout Engine has a column of its own: its controls scroll inside it */
+.engine-sidebar .config-section {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-bottom: none;
 }
-.collapse-chevron { transition: transform 0.15s ease; }
-.config-section.collapsed .collapse-chevron { transform: rotate(-90deg); }
-.config-section.collapsed .control-grid { display: none; }
+
 
 .control-grid {
   display: flex;
@@ -1035,11 +1034,17 @@ input[type=range]::-webkit-slider-thumb:hover {
 }
 
 .left-resizer {
-  left: calc(var(--left-width, 320px) + var(--panel-gap) - 8px);
+  left: calc(var(--left-width, 400px) + var(--panel-gap) - 8px);
 }
 
+/* between the document and the Layout Engine column */
+.engine-resizer {
+  right: calc(var(--right-width, 380px) + var(--engine-width, 330px) + var(--panel-gap) * 2 - 8px);
+}
+
+/* between the Layout Engine and the Layout DOM column */
 .right-resizer {
-  right: calc(var(--right-width, 340px) + var(--panel-gap) - 8px);
+  right: calc(var(--right-width, 380px) + var(--panel-gap) - 8px);
 }
 
 .resizer::after {
@@ -1134,6 +1139,20 @@ input[type=range]::-webkit-slider-thumb:hover {
 }
 .tr-seg.selected { box-shadow: 0 0 0 2px rgba(244, 114, 182, 0.9); }
 .tr-seg.overflow { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.9); }
+
+/* comic balloons: translation drawn inside the balloon shape */
+.tr-balloon {
+  position: absolute;
+  /* same X-ray look as #pdf-canvas: the balloon is painted in the page's own
+     colours, so it must go through the same filter to blend with it */
+  filter: invert(0.92) hue-rotate(185deg) saturate(1.8) contrast(1.25) brightness(0.9);
+}
+.tr-balloon-cover { position: absolute; inset: 0; }
+.tr-balloon-line {
+  position: absolute;
+  white-space: nowrap;
+}
+.tr-balloon.selected { outline: 2px dashed rgba(244, 114, 182, 0.9); outline-offset: 2px; }
 
 .role-chip {
   --role-color: #34d399;
@@ -1338,6 +1357,22 @@ input[type=range]::-webkit-slider-thumb:hover {
   margin-bottom: 8px;
 }
 .snap-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.snapshot-dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
+.snap-verdict[hidden], .snap-verdict label[hidden] { display: none; }
+#snap-ocr-text {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--bg-control);
+  color: var(--color-text);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  font: 0.75rem/1.45 var(--font-mono);
+  white-space: pre;
+  overflow-x: auto;
+}
+#ocr-models-files { list-style: none; display: flex; flex-direction: column; gap: 2px; }
 
 .auto-hint {
   font-size: 0.7rem;

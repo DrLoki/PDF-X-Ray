@@ -2,8 +2,19 @@ import * as pdfjsLib from './assets/pdfjs/pdf.min.mjs';
 import { extractPage } from './extract.js';
 import { serializeLayoutTree, serializeUnits, serializeParagraphsText, parseTranslations } from './export.js';
 import { pseudoTranslate, renderTranslationLayer } from './translate.js';
+import { rasterizePage, recognizeCanvas, formatBytes, ocrSummary, LOW_CONF, OCR_DPI } from './ocr.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdfjs/pdf.worker.min.mjs';
+
+// Resources pdf.js 6 loads on demand (copied by tools/vendor_pdfjs.mjs).
+// Without `wasmUrl` CCITT fax / JBIG2 (black-and-white scans) and JPEG 2000
+// images are not decoded and the page renders blank; `iccUrl` serves the
+// CMYK profile. Absolute URLs: the worker resolves them on its own base.
+const pdfjsAsset = (dir) => new URL(`./assets/pdfjs/${dir}/`, location.href).href;
+const PDFJS_RESOURCES = {
+  wasmUrl: pdfjsAsset('wasm'),
+  iccUrl: pdfjsAsset('iccs'),
+};
 
 // Colours per block role (overlay, DOM tree, paragraph list).
 const ROLE_COLORS = {
@@ -18,6 +29,11 @@ const ROLE_COLORS = {
   table: '#facc15',
   'figure-text': '#fb923c',
   decoration: '#78716c',
+  // comic pages
+  balloon: '#22d3ee',
+  narration: '#f59e0b',
+  'comic-text': '#a3e635',
+  sfx: '#e879f9',
 };
 const roleColor = (r) => ROLE_COLORS[r] || '#34d399';
 
@@ -33,6 +49,15 @@ const state = {
   loadToken: 0,
 
   pageData: new Map(),       // pageNum → PageInput sent to Rust (PDF points)
+  textLayer: new Map(),      // pageNum → PageInput as extracted from the PDF (text layer)
+  pageKinds: new Map(),      // pageNum → { kind: 'text'|'scan', chars, imageCover, reason }
+  ocrResults: new Map(),     // pageNum → { page, items, scale, dpi } from `ocr_page`
+  pageModes: new Map(),      // pageNum → 'text'|'ocr' (overrides the document mode)
+  ocrDeclined: false,        // the user refused the model download in this session
+  ocrFailed: new Set(),      // pages whose OCR failed (not retried by the background queue)
+  ocrWorker: null,           // load token of the running background OCR queue, or null
+  ocrStats: { done: 0, t0: 0, lastAnalysis: 0 },
+  analysisSeq: 0,            // only the latest analysis result is applied
   extractionDone: false,
   doc: null,                 // DocumentResult
   pageResults: new Map(),    // pageNum → PageResult
@@ -146,28 +171,16 @@ function cacheElements() {
     progressEta: 'progress-eta', progressBar: 'progress-bar',
     btnSnapshot: 'btn-snapshot', snapshotDialog: 'snapshot-dialog', snapPage: 'snap-page', snapSettings: 'snap-settings',
     snapNote: 'snap-note', snapPng: 'snap-png', autoHint: 'auto-hint',
+    selectOcrDoc: 'select-ocr-doc', selectOcrPage: 'select-ocr-page', ocrPageKind: 'ocr-page-kind', ocrHint: 'ocr-hint', selectComicDir: 'select-comic-dir',
+    ocrModelsDialog: 'ocr-models-dialog', ocrModelsWhy: 'ocr-models-why', ocrModelsFiles: 'ocr-models-files',
+    ocrModelsWhere: 'ocr-models-where', snapOcr: 'snap-ocr', snapOcrText: 'snap-ocr-text',
+    snapOcrTextLayerLabel: 'snap-ocr-textlayer-label',
   };
   for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
 
-function setupCollapsibleConfig() {
-  const toggle = document.getElementById('config-toggle');
-  const section = toggle?.closest('.config-section');
-  if (!toggle || !section) return;
-  const apply = (collapsed) => {
-    section.classList.toggle('collapsed', collapsed);
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    try { localStorage.setItem('configCollapsed', collapsed ? '1' : '0'); } catch {}
-  };
-  try { apply(localStorage.getItem('configCollapsed') === '1'); } catch {}
-  toggle.addEventListener('click', () => apply(!section.classList.contains('collapsed')));
-  toggle.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle.click(); }
-  });
-}
 
 function registerEvents() {
-  setupCollapsibleConfig();
   el.btnOpen.addEventListener('click', () => el.fileSelector.click());
   el.fileSelector.addEventListener('change', (e) => e.target.files?.[0] && loadPDFFile(e.target.files[0]));
 
@@ -200,6 +213,21 @@ function registerEvents() {
   el.chkUseTags.addEventListener('change', runAnalysis);
   el.chkStitch.addEventListener('change', runAnalysis);
   el.btnReanalyze.addEventListener('click', runAnalysis);
+  el.selectOcrDoc.addEventListener('change', () => {
+    if (el.selectOcrDoc.value === 'ocr' || el.selectOcrDoc.value === 'comic') state.ocrDeclined = false; // an explicit choice asks again
+    applyTextSources();
+  });
+  el.selectOcrPage.addEventListener('change', () => {
+    const v = el.selectOcrPage.value;
+    if (v) state.pageModes.set(state.pageNum, v);
+    else state.pageModes.delete(state.pageNum);
+    if (v === 'ocr' || v === 'comic') state.ocrDeclined = false;
+    applyTextSources();
+  });
+  el.selectComicDir.addEventListener('change', runAnalysis);
+  el.snapOcrText.addEventListener('input', () => {
+    el.snapshotDialog.querySelector('input[name="ocrref"][value="user"]').checked = true;
+  });
   el.btnSnapshot.addEventListener('click', openSnapshotDialog);
   el.snapshotDialog.addEventListener('close', () => {
     if (el.snapshotDialog.returnValue === 'save') saveSnapshot();
@@ -378,7 +406,7 @@ async function loadPDFFile(file) {
     const data = await file.arrayBuffer();
     // pdf.js 6: only the loading task can be destroyed (PDFDocumentProxy.destroy was removed).
     // Open the new document first, then release the old one, so a failed open keeps the current file.
-    const task = pdfjsLib.getDocument({ data });
+    const task = pdfjsLib.getDocument({ data, ...PDFJS_RESOURCES });
     const doc = await task.promise;
     if (token !== state.loadToken) { task.destroy(); return; }
     const oldTask = state.loadingTask;
@@ -389,6 +417,12 @@ async function loadPDFFile(file) {
     state.totalPageCount = state.pdfDoc.numPages;
     state.pageNum = 1;
     state.pageData.clear();
+    state.textLayer.clear();
+    state.pageKinds.clear();
+    state.ocrResults.clear();
+    state.pageModes.clear();
+    state.ocrFailed.clear();
+    state.ocrWorker = null;
     state.pageResults.clear();
     state.paraById.clear();
     state.doc = null;
@@ -433,6 +467,7 @@ async function extractDocument(token) {
         console.warn('Extraction failed on page ' + p, err);
         state.pageData.set(p, { pageNum: p, pageBounds: { x: 0, y: 0, w: 1, h: 1 }, items: [], borderedBoxes: [], images: [] });
       }
+      state.textLayer.set(p, state.pageData.get(p));
     }
     done++;
     if (done === 1) drawOverlay();
@@ -441,7 +476,263 @@ async function extractDocument(token) {
   }
   if (token !== state.loadToken) return;
   state.extractionDone = true;
-  await runAnalysis(true);
+  await classifyPages();
+  const ocrRan = await prepareTextSources(token);
+  if (token !== state.loadToken) return;
+  await runAnalysis(!ocrRan);
+}
+
+// --------------------------------------------------------------------------
+// Text source per page: PDF text layer or OCR
+// --------------------------------------------------------------------------
+
+/**
+ * 'text' | 'ocr' | 'comic' for a page: page override, else document mode,
+ * else the classification (scans are OCR'd; the OCR result then tells
+ * whether the page is a comic page).
+ */
+function effectiveMode(p) {
+  const mode = state.pageModes.get(p) || el.selectOcrDoc.value;
+  if (mode !== 'auto') return mode;
+  if (state.pageKinds.get(p)?.kind !== 'scan') return 'text';
+  return state.ocrResults.get(p)?.comic?.isComic ? 'comic' : 'ocr';
+}
+
+const usesOcr = (mode) => mode === 'ocr' || mode === 'comic';
+
+/** Page input built from the OCR of page `p` (comic layout included on comic pages). */
+function ocrPageInput(p) {
+  const r = state.ocrResults.get(p);
+  const input = { ...state.textLayer.get(p), items: r.items };
+  if (effectiveMode(p) === 'comic') input.comic = r.comic;
+  else delete input.comic;
+  return input;
+}
+
+async function classifyPages() {
+  if (!isTauri()) return;
+  const pages = [...state.textLayer.values()];
+  try {
+    const kinds = await window.__TAURI__.core.invoke('classify_pages', { pages });
+    state.pageKinds = new Map(kinds.map(k => [k.pageNum, k]));
+  } catch (err) {
+    console.warn('Page classification failed:', err);
+  }
+}
+
+/**
+ * Make `pageData` follow the text source of every page: restore the text
+ * layer where it is used, OCR the current page right away (asking for the
+ * models first) and leave the other pages to the background queue
+ * (`ocrBackground`), so the document can be read while the OCR goes on.
+ * Returns true when the OCR ran on the current page.
+ */
+async function prepareTextSources(token) {
+  if (!isTauri()) return false;
+  const n = state.totalPageCount;
+  for (let p = 1; p <= n; p++) {
+    if (effectiveMode(p) === 'text' && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+    else if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
+  }
+  const missing = ocrQueue();
+  if (missing.length && !(await ensureOcrModels(missing.length))) {
+    // without models the text layer stays in use
+    for (let p = 1; p <= n; p++) if (usesOcr(effectiveMode(p)) && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+    refreshOcrControls();
+    return false;
+  }
+  let ran = false;
+  if (missing[0] === state.pageNum) {
+    if (state.ocrWorker !== token) state.ocrStats = { done: 0, t0: performance.now(), lastAnalysis: 0 };
+    ran = await ocrOnePage(state.pageNum, token);
+  }
+  if (token !== state.loadToken) return ran;
+  if (ocrQueue().length) ocrBackground(token);
+  refreshOcrControls();
+  return ran;
+}
+
+/**
+ * Pages still waiting for the OCR, in the order the background queue takes
+ * them: the current page, the following pages, then the preceding ones.
+ */
+function ocrQueue() {
+  const n = state.totalPageCount;
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const p = ((state.pageNum - 1 + k) % n) + 1;
+    if (usesOcr(effectiveMode(p)) && !state.ocrResults.has(p) && !state.ocrFailed.has(p)) out.push(p);
+  }
+  return out;
+}
+
+/** Rasterise and recognise one page; its input switches to the OCR text. */
+async function ocrOnePage(p, token) {
+  const total = state.ocrStats.done + ocrQueue().length;
+  progressOcr(state.ocrStats.done, total, p, state.ocrStats.t0);
+  try {
+    const raster = await rasterizePage(state.pdfDoc, p, OCR_DPI);
+    const res = await recognizeCanvas(window.__TAURI__.core.invoke, raster);
+    if (token !== state.loadToken) return false;
+    state.ocrResults.set(p, { ...res, dpi: raster.dpi });
+  } catch (err) {
+    console.error('OCR failed on page ' + p, err);
+    state.ocrFailed.add(p);
+    setStatus(`OCR fallito a pagina ${p}: ${err}`, 'warn');
+    return false;
+  }
+  state.ocrStats.done++;
+  state.pageData.set(p, ocrPageInput(p));
+  if (p === state.pageNum) { drawOverlay(); refreshOcrControls(); }
+  return true;
+}
+
+/**
+ * Background OCR of the remaining pages. The queue is re-read after every
+ * page, so moving to a page not recognised yet makes it the next one, and a
+ * change of mode adds or removes pages. The layout is re-analysed when a
+ * page near the one being read is done (and at least every 20 s), then once
+ * more at the end.
+ */
+async function ocrBackground(token) {
+  if (state.ocrWorker === token) return; // already running: it reads the queue again after each page
+  state.ocrWorker = token;
+  if (!state.ocrStats.t0) state.ocrStats = { done: 0, t0: performance.now(), lastAnalysis: 0 };
+  try {
+    for (;;) {
+      if (token !== state.loadToken) return;
+      const p = ocrQueue()[0];
+      if (!p) break;
+      const ok = await ocrOnePage(p, token);
+      if (token !== state.loadToken) return;
+      const near = p >= state.pageNum - 1 && p <= state.pageNum + 2;
+      if (ok && (near || performance.now() - state.ocrStats.lastAnalysis > 20000)) {
+        state.ocrStats.lastAnalysis = performance.now();
+        await runAnalysis(false);
+      }
+    }
+  } finally {
+    if (state.ocrWorker === token) state.ocrWorker = null;
+  }
+  if (token !== state.loadToken) return;
+  const { done, t0 } = state.ocrStats;
+  state.ocrStats = { done: 0, t0: 0, lastAnalysis: 0 };
+  if (done) {
+    progressOcr(done, done, state.pageNum, t0);
+    await runAnalysis(false);
+  }
+  refreshOcrControls();
+}
+
+/** Re-apply the text sources after a change of mode, then re-analyse. */
+async function applyTextSources() {
+  refreshOcrControls();
+  if (!state.pdfDoc || !state.extractionDone) return;
+  const token = state.loadToken;
+  await prepareTextSources(token);
+  if (token !== state.loadToken) return;
+  await runAnalysis(false);
+}
+
+function progressOcr(done, total, pageNum, t0) {
+  const elapsed = performance.now() - t0;
+  const per = done ? elapsed / done : null;
+  const eta = per === null ? 'stima in corso…' : done >= total ? '' : `~${formatDuration(per * (total - done))} rimanenti`;
+  const background = done > 0 && done < total ? ' · le pagine pronte sono già consultabili' : '';
+  paintProgress('OCR', `pagina ${pageNum} · ${done}/${total}${background}`, total ? done / total : 1, eta, done === 0);
+  if (done >= total) setStatus(`OCR completato: ${total} pagine`);
+}
+
+/** " · OCR k/N in corso" while the background queue runs. */
+function ocrStatusSuffix() {
+  if (state.ocrWorker !== state.loadToken) return '';
+  const left = ocrQueue().length;
+  return left ? ` · OCR in corso: ${left} pagine in coda` : '';
+}
+
+/** Ask for the model download when the models are missing. Resolves to true when they are installed. */
+async function ensureOcrModels(pages) {
+  const invoke = window.__TAURI__.core.invoke;
+  let status;
+  try {
+    status = await invoke('ocr_models_status');
+  } catch (err) {
+    setStatus('OCR non disponibile: ' + err, 'warn');
+    return false;
+  }
+  if (status.installed) return true;
+  if (state.ocrDeclined) return false;
+
+  el.ocrModelsWhy.textContent = `${pages} ${pages === 1 ? 'pagina non ha' : 'pagine non hanno'} testo selezionabile e ${pages === 1 ? 'richiede' : 'richiedono'} l'OCR.`;
+  el.ocrModelsFiles.innerHTML = '';
+  for (const f of status.files.filter(f => !f.present)) {
+    const li = document.createElement('li');
+    li.textContent = `${f.name} · ${f.role} · ${formatBytes(f.size)}`;
+    el.ocrModelsFiles.appendChild(li);
+  }
+  el.ocrModelsWhere.textContent = `Totale ${formatBytes(status.missingBytes)} da ${status.sources.join(' (o ')}${status.sources.length > 1 ? ')' : ''}, salvati in ${status.dir}.`;
+  const answer = await new Promise((resolve) => {
+    el.ocrModelsDialog.addEventListener('close', () => resolve(el.ocrModelsDialog.returnValue), { once: true });
+    el.ocrModelsDialog.returnValue = '';
+    el.ocrModelsDialog.showModal();
+  });
+  if (answer !== 'download') {
+    state.ocrDeclined = true;
+    setStatus('OCR non attivo: modelli non scaricati. Le pagine senza testo restano vuote.', 'warn');
+    return false;
+  }
+
+  let unlisten = null;
+  try {
+    paintProgress('Download modelli OCR', 'connessione…', 0, '', true);
+    unlisten = await window.__TAURI__.event.listen('ocr-download-progress', (e) => {
+      const { file, total, done } = e.payload;
+      paintProgress('Download modelli OCR', `${file} · ${formatBytes(done)} / ${formatBytes(total)}`, total ? done / total : 0, '');
+    });
+    await invoke('ocr_download_models');
+    setStatus('Modelli OCR installati.', 'ok');
+    return true;
+  } catch (err) {
+    console.error('Model download failed:', err);
+    progressFail('download dei modelli OCR fallito');
+    setStatus('Download dei modelli OCR fallito: ' + err, 'warn');
+    alert('Download dei modelli OCR fallito:\n' + err);
+    return false;
+  } finally {
+    if (unlisten) unlisten();
+  }
+}
+
+/** Page selector, page kind badge and OCR summary for the current page. */
+function refreshOcrControls() {
+  if (!el.selectOcrPage) return;
+  const p = state.pageNum;
+  el.selectOcrPage.value = state.pageModes.get(p) || '';
+  const kind = state.pageKinds.get(p);
+  const mode = state.pdfDoc ? effectiveMode(p) : null;
+  const res = state.ocrResults.get(p);
+  const usingOcr = usesOcr(mode) && res && state.pageData.get(p)?.items === res.items;
+  const comic = usingOcr && mode === 'comic';
+  el.ocrPageKind.textContent = !kind ? '—' : (kind.kind === 'scan' ? 'scansione' : 'testo') + (comic ? ' · fumetto' : usingOcr ? ' · OCR' : '');
+  if (!kind) { el.ocrHint.hidden = true; return; }
+  let hint = `Classificazione: ${kind.reason}.`;
+  if (usingOcr) {
+    const s = ocrSummary(res);
+    hint += ` OCR (${res.page.engine}, ${Math.round(res.dpi)} DPI): ${s.lines} righe, confidenza media ${(s.conf * 100).toFixed(1)}%` +
+      (s.low ? `, ${s.low} righe incerte (in arancione con "Words")` : '') + ` · ${formatDuration(s.ms) || s.ms + ' ms'}.`;
+    if (res.comic) {
+      const c = res.comic;
+      const count = (k) => c.balloons.filter(b => b.kind === k).length;
+      const found = `${c.panels.length} vignette, ${count('balloon')} balloon, ${count('narration')} didascalie, ${count('comic-text')} testi liberi, ${count('sfx')} onomatopee`;
+      hint += comic ? ` Fumetto: ${found}.` : c.isComic ? ` Sembra un fumetto (${found}).` : '';
+    }
+  } else if (usesOcr(mode)) {
+    hint += state.ocrDeclined ? ' OCR non attivo: modelli non scaricati.'
+      : state.ocrFailed.has(p) ? ' OCR fallito su questa pagina.'
+      : state.ocrWorker === state.loadToken ? ' OCR in corso in background: questa pagina è la prossima.' : ' OCR in attesa.';
+  }
+  el.ocrHint.textContent = hint;
+  el.ocrHint.hidden = false;
 }
 
 async function buildPageRefMap(token) {
@@ -473,6 +764,7 @@ function analysisOptions() {
     priority: state.priority,
     useTags: el.chkUseTags.checked,
     stitch: el.chkStitch.checked,
+    rtl: el.selectComicDir.value === 'rtl',
   };
   if (!el.chkAutoGutter.checked) {
     opts.manual = {
@@ -495,13 +787,16 @@ async function runAnalysis(fullRun = false) {
   }
   if (!state.extractionDone) return; // analysis starts automatically when extraction ends
   const token = state.loadToken;
+  const seq = ++state.analysisSeq;
   const pages = Array.from({ length: state.totalPageCount }, (_, i) => state.pageData.get(i + 1)).filter(Boolean);
-  setStatus('Analisi in corso…');
-  const t0 = progressAnalyze(pages.length, fullRun === true);
+  // during the background OCR the progress panel belongs to the OCR
+  const quiet = state.ocrWorker === token;
+  if (!quiet) setStatus('Analisi in corso…');
+  const t0 = quiet ? performance.now() : progressAnalyze(pages.length, fullRun === true);
   try {
     const options = analysisOptions();
     const doc = await window.__TAURI__.core.invoke('analyze_document', { pages, options });
-    if (token !== state.loadToken) return;
+    if (token !== state.loadToken || seq !== state.analysisSeq) return;
     state.doc = doc;
     state.docOptions = options;
     state.pageResults = new Map(doc.pages.map(p => [p.pageNum, p]));
@@ -510,14 +805,14 @@ async function runAnalysis(fullRun = false) {
     state.selectedBlockId = null;
     const s = doc.stats;
     const lost = s.inputChars - s.outputChars;
-    setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : ''), lost ? 'warn' : 'ok');
-    progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
+    setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : '') + ocrStatusSuffix(), lost ? 'warn' : 'ok');
+    if (!quiet) progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
     await recomputePieces();
     refreshPageUI();
   } catch (err) {
     console.error('Analysis failed:', err);
     setStatus('Analisi fallita: ' + err, 'warn');
-    if (token === state.loadToken) progressFail('analisi fallita: ' + err);
+    if (token === state.loadToken && !quiet) progressFail('analisi fallita: ' + err);
   }
 }
 
@@ -589,6 +884,7 @@ async function renderPage(num) {
 }
 
 function refreshPageUI() {
+  refreshOcrControls();
   syncAutoSliders();
   renderLayoutDOMTree();
   renderParagraphList();
@@ -771,10 +1067,13 @@ function drawOverlay() {
   const pr = currentPageResult();
 
   if (el.chkShowChars.checked && data) {
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
-    ctx.fillStyle = 'rgba(56, 189, 248, 0.04)';
     ctx.lineWidth = px(1);
     for (const it of data.items) {
+      // OCR runs: violet, orange when the recognition is uncertain
+      const ocr = it.source === 'ocr';
+      const low = ocr && it.conf < LOW_CONF;
+      ctx.strokeStyle = low ? 'rgba(251, 146, 60, 0.9)' : ocr ? 'rgba(167, 139, 250, 0.5)' : 'rgba(56, 189, 248, 0.25)';
+      ctx.fillStyle = low ? 'rgba(251, 146, 60, 0.12)' : ocr ? 'rgba(167, 139, 250, 0.06)' : 'rgba(56, 189, 248, 0.04)';
       ctx.fillRect(it.x, it.y, it.width, it.height);
       ctx.strokeRect(it.x, it.y, it.width, it.height);
     }
@@ -816,7 +1115,14 @@ function drawOverlay() {
 
 function drawBlockRecursive(ctx, block, px) {
   const b = block.bounds;
-  if (block.isBorderedBox) {
+  const kind = block.containerKind;
+  if (kind === 'panel' || kind === 'balloon' || kind === 'narration') {
+    // comic pages: panels in blue, containers in the colour of their role
+    ctx.setLineDash([]);
+    ctx.strokeStyle = kind === 'panel' ? 'rgba(59, 130, 246, 0.85)' : roleColor(kind);
+    ctx.lineWidth = px(kind === 'panel' ? 2.5 : 2);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+  } else if (block.isBorderedBox) {
     ctx.setLineDash([]);
     ctx.strokeStyle = block.isTable ? 'rgba(250, 204, 21, 0.8)' : 'rgba(216, 180, 254, 0.85)';
     ctx.lineWidth = px(2);
@@ -1413,11 +1719,17 @@ function setupResizableSidebars() {
   };
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+  const px = (name) => parseFloat(getComputedStyle(container).getPropertyValue(name)) || 0;
   drag(document.getElementById('left-resizer'), 'col-resize', (ev) => {
-    container.style.setProperty('--left-width', clamp(ev.clientX - 16, 320, window.innerWidth * 0.45) + 'px');
+    container.style.setProperty('--left-width', clamp(ev.clientX - 16, 300, window.innerWidth * 0.4) + 'px');
+  });
+  // the Layout Engine column: its left edge follows the mouse, the DOM column stays
+  drag(document.getElementById('engine-resizer'), 'col-resize', (ev) => {
+    const w = window.innerWidth - ev.clientX - px('--right-width') - 32;
+    container.style.setProperty('--engine-width', clamp(w, 260, window.innerWidth * 0.35) + 'px');
   });
   drag(document.getElementById('right-resizer'), 'col-resize', (ev) => {
-    container.style.setProperty('--right-width', clamp(window.innerWidth - ev.clientX - 16, 340, window.innerWidth * 0.45) + 'px');
+    container.style.setProperty('--right-width', clamp(window.innerWidth - ev.clientX - 16, 300, window.innerWidth * 0.35) + 'px');
   });
   const inspector = document.getElementById('inspector-section');
   let startH = 0;
@@ -1455,7 +1767,56 @@ function openSnapshotDialog() {
   const manual = !!state.docOptions?.manual;
   el.snapshotDialog.querySelector(`input[name="verdict"][value="${manual ? 'manual-better' : 'reference'}"]`).checked = true;
   el.snapNote.value = '';
+  // OCR pages: reference transcription for the OCR evaluation
+  const ocr = currentOcr();
+  el.snapOcr.hidden = !ocr;
+  if (ocr) {
+    el.snapOcrText.value = ocr.page.lines.map(l => l.text).join('\n');
+    const hasLayer = (state.pageKinds.get(state.pageNum)?.chars || 0) >= 40;
+    el.snapOcrTextLayerLabel.hidden = !hasLayer;
+    el.snapshotDialog.querySelector(`input[name="ocrref"][value="${hasLayer ? 'text-layer' : 'user'}"]`).checked = true;
+  }
   el.snapshotDialog.showModal();
+}
+
+/** OCR result in use on the current page, or null. */
+function currentOcr() {
+  const p = state.pageNum;
+  const res = state.ocrResults.get(p);
+  return res && state.pageData.get(p)?.items === res.items ? res : null;
+}
+
+/** OCR section of a snapshot: engine, image, lines and the reference chosen in the dialog. */
+async function ocrSnapshot(pageNum, res, stem) {
+  const choice = el.snapshotDialog.querySelector('input[name="ocrref"]:checked')?.value || 'none';
+  let reference = null;
+  if (choice === 'user') {
+    reference = { source: 'user', lines: el.snapOcrText.value.split('\n').map(s => s.trim()).filter(Boolean) };
+  } else if (choice === 'ocr') {
+    reference = { source: 'ocr', lines: res.page.lines.map(l => l.text) };
+  } else if (choice === 'text-layer') {
+    // the lines the layout engine builds from the PDF text layer of the same page
+    const layer = state.textLayer.get(pageNum);
+    const doc = await window.__TAURI__.core.invoke('analyze_document', { pages: [layer], options: state.docOptions });
+    const pr = doc.pages.find(p => p.pageNum === pageNum);
+    reference = { source: 'text-layer', lines: (pr?.lines || []).map(l => l.text).filter(t => t.trim()) };
+  }
+  // the exact image given to the OCR (same DPI, same renderer), for --eval-ocr
+  const raster = await rasterizePage(state.pdfDoc, pageNum, res.dpi);
+  return {
+    section: {
+      engine: res.page.engine,
+      dpi: res.dpi,
+      image: `${stem}_ocr.png`,
+      width: res.page.width,
+      height: res.page.height,
+      detectMs: res.page.detectMs,
+      recognizeMs: res.page.recognizeMs,
+      lines: res.page.lines,
+      reference,
+    },
+    png: raster.canvas.toDataURL('image/png'),
+  };
 }
 
 function leafSummaries(root) {
@@ -1566,11 +1927,19 @@ async function saveSnapshot() {
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
     const base = (state.fileName || 'document').replace(/\.pdf$/i, '').slice(0, 40);
     const stem = `${base}_p${pageNum}_${verdict}_${stamp}`;
-    const json = JSON.stringify(snapshot, null, 1);
     const png = el.snapPng.checked ? viewPng() : null;
+    let ocrPng = null;
+    const ocrRes = currentOcr();
+    if (ocrRes && isTauri()) {
+      setStatus('Snapshot: immagine OCR…');
+      const o = await ocrSnapshot(pageNum, ocrRes, stem.replace(/[^\p{L}\p{N}._-]/gu, '_'));
+      snapshot.ocr = o.section;
+      ocrPng = o.png;
+    }
+    const json = JSON.stringify(snapshot, null, 1);
 
     if (isTauri()) {
-      const path = await invoke('save_snapshot', { fileStem: stem, json, pngBase64: png });
+      const path = await invoke('save_snapshot', { fileStem: stem, json, pngBase64: png, ocrPngBase64: ocrPng });
       setStatus(`Snapshot salvato: ${path}`, 'ok');
       try { await window.__TAURI__.opener?.revealItemInDir(path); } catch (_) { /* best effort */ }
     } else {
