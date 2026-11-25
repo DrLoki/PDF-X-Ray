@@ -88,10 +88,11 @@ body, html {
 
 /* 3. App Core Structure Layout */
 .app-container {
-  --left-width: 320px;
-  --right-width: 340px;
+  --left-width: 400px;
+  --engine-width: 330px;
+  --right-width: 380px;
   display: grid;
-  grid-template-columns: var(--left-width) 1fr var(--right-width);
+  grid-template-columns: var(--left-width) minmax(0, 1fr) var(--engine-width) var(--right-width);
   width: 100%;
   height: 100vh;
   padding: var(--panel-gap);
@@ -707,16 +708,14 @@ body, html {
   flex-shrink: 0;
 }
 
-.collapsible-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  user-select: none;
+/* the Layout Engine has a column of its own: its controls scroll inside it */
+.engine-sidebar .config-section {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-bottom: none;
 }
-.collapse-chevron { transition: transform 0.15s ease; }
-.config-section.collapsed .collapse-chevron { transform: rotate(-90deg); }
-.config-section.collapsed .control-grid { display: none; }
+
 
 .control-grid {
   display: flex;
@@ -1035,11 +1034,17 @@ input[type=range]::-webkit-slider-thumb:hover {
 }
 
 .left-resizer {
-  left: calc(var(--left-width, 320px) + var(--panel-gap) - 8px);
+  left: calc(var(--left-width, 400px) + var(--panel-gap) - 8px);
 }
 
+/* between the document and the Layout Engine column */
+.engine-resizer {
+  right: calc(var(--right-width, 380px) + var(--engine-width, 330px) + var(--panel-gap) * 2 - 8px);
+}
+
+/* between the Layout Engine and the Layout DOM column */
 .right-resizer {
-  right: calc(var(--right-width, 340px) + var(--panel-gap) - 8px);
+  right: calc(var(--right-width, 380px) + var(--panel-gap) - 8px);
 }
 
 .resizer::after {

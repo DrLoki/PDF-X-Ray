@@ -179,24 +179,8 @@ function cacheElements() {
   for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
 
-function setupCollapsibleConfig() {
-  const toggle = document.getElementById('config-toggle');
-  const section = toggle?.closest('.config-section');
-  if (!toggle || !section) return;
-  const apply = (collapsed) => {
-    section.classList.toggle('collapsed', collapsed);
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    try { localStorage.setItem('configCollapsed', collapsed ? '1' : '0'); } catch {}
-  };
-  try { apply(localStorage.getItem('configCollapsed') === '1'); } catch {}
-  toggle.addEventListener('click', () => apply(!section.classList.contains('collapsed')));
-  toggle.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle.click(); }
-  });
-}
 
 function registerEvents() {
-  setupCollapsibleConfig();
   el.btnOpen.addEventListener('click', () => el.fileSelector.click());
   el.fileSelector.addEventListener('change', (e) => e.target.files?.[0] && loadPDFFile(e.target.files[0]));
 
@@ -1735,11 +1719,17 @@ function setupResizableSidebars() {
   };
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+  const px = (name) => parseFloat(getComputedStyle(container).getPropertyValue(name)) || 0;
   drag(document.getElementById('left-resizer'), 'col-resize', (ev) => {
-    container.style.setProperty('--left-width', clamp(ev.clientX - 16, 320, window.innerWidth * 0.45) + 'px');
+    container.style.setProperty('--left-width', clamp(ev.clientX - 16, 300, window.innerWidth * 0.4) + 'px');
+  });
+  // the Layout Engine column: its left edge follows the mouse, the DOM column stays
+  drag(document.getElementById('engine-resizer'), 'col-resize', (ev) => {
+    const w = window.innerWidth - ev.clientX - px('--right-width') - 32;
+    container.style.setProperty('--engine-width', clamp(w, 260, window.innerWidth * 0.35) + 'px');
   });
   drag(document.getElementById('right-resizer'), 'col-resize', (ev) => {
-    container.style.setProperty('--right-width', clamp(window.innerWidth - ev.clientX - 16, 340, window.innerWidth * 0.45) + 'px');
+    container.style.setProperty('--right-width', clamp(window.innerWidth - ev.clientX - 16, 300, window.innerWidth * 0.35) + 'px');
   });
   const inspector = document.getElementById('inspector-section');
   let startH = 0;

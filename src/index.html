@@ -185,17 +185,14 @@
           </div>
         </div>
       </main>
-      <div class="resizer right-resizer" id="right-resizer"></div>
+      <div class="resizer engine-resizer" id="engine-resizer"></div>
 
-      <!-- COLUMN 3: RIGHT SIDEBAR (XY-Cut Sliders & Inspector) -->
-      <aside class="sidebar right-sidebar glass" id="right-sidebar">
-        
+      <!-- COLUMN 3: LAYOUT ENGINE (thresholds, text source, snapshot) -->
+      <aside class="sidebar right-sidebar engine-sidebar glass" id="engine-sidebar">
+
         <!-- Section A: XY-Cut Config -->
         <section class="config-section">
-          <h3 id="config-toggle" class="collapsible-title" role="button" tabindex="0" aria-expanded="true" title="Mostra/nascondi">
-            <span>Layout Engine</span>
-            <svg class="collapse-chevron" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
-          </h3>
+          <h3>Layout Engine</h3>
           <div class="control-grid" id="config-body">
             
             <!-- Auto-Detect Gutters -->
@@ -324,6 +321,11 @@
             </div>
           </div>
         </section>
+      </aside>
+      <div class="resizer right-resizer" id="right-resizer"></div>
+
+      <!-- COLUMN 4: GENERATED LAYOUT DOM & FORMATTING INSPECTOR -->
+      <aside class="sidebar right-sidebar glass" id="right-sidebar">
 
         <!-- Section B: Generated Layout DOM -->
         <section class="dom-tree-section">
