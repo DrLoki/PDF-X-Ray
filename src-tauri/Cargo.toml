@@ -1,6 +1,6 @@
 [package]
 name = "pdf-xray"
-version = "0.2.0"
+version = "0.3.0"
 description = "PDF X-Ray — Structure & Layout Analyzer"
 authors = ["Giampaolo Bolzonella <giampaolo.bolzonella@gmail.com>"]
 edition = "2021"
