@@ -41,6 +41,7 @@ An advanced desktop application built on **Tauri v2** and **Vanilla Web Technolo
    - Override per document or per page (*Automatico* / *Strato di testo* / *OCR*); uncertain words are highlighted in the **Words** overlay.
    - The models (12 MB) are downloaded once, on first use and only after confirmation, then verified by SHA-256.
    - OCR snapshots save the image given to the engine and a reference transcription; `cli_analyze --eval-ocr` measures CER / WER of the current engine on them.
+   - **Comics**: on scanned comic pages the panels and the text containers (speech balloons, narration boxes, free text, sound effects) are detected on the page image; each container becomes one translation unit, in comic reading order (left to right, or right to left for manga-style books). Detected automatically, or forced per document / page (*Fumetto*); `cli_analyze --eval-comic` scores comic snapshots.
 
 7. **Bi-directional Synced Interlock & Inspector**:
    - Hovering/clicking a block on the canvas highlights it in the layout DOM tree and vice versa; the inspector shows role, reading order, font, alignment, the block text and the logical paragraphs it belongs to (full stitched text and translation).
@@ -68,7 +69,7 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 6. **Paragraphs & stitching** (`flow.rs`): paragraph split inside blocks, continuation across blocks/pages, de-hyphenation.
 7. **Re-flow** (`reflow.rs`): translated text distributed over the paragraph's segments.
 
-Scanned pages first go through the OCR (`ocr/`): classification, 300 DPI rasterisation with pdf.js, PaddleOCR detection + recognition, recognised lines → text runs.
+Scanned pages first go through the OCR (`ocr/`): classification, 300 DPI rasterisation with pdf.js, PaddleOCR detection + recognition, recognised lines → text runs. Comic pages (`comic/`) are then laid out from their panels and balloons instead of XY-Cut.
 
 Full details: [`docs/layout-pipeline.md`](docs/layout-pipeline.md).
 

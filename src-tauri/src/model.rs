@@ -127,6 +127,10 @@ pub struct PageInput {
     /// Placed raster images (used to detect captions).
     #[serde(default)]
     pub images: Vec<Bounds>,
+    /// Panels and text containers of a comic page (PDF points). When set,
+    /// the page is laid out from them instead of XY-Cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comic: Option<crate::comic::ComicLayout>,
 }
 
 impl PageInput {
@@ -155,6 +159,7 @@ impl PageInput {
             items,
             bordered_boxes: self.bordered_boxes.iter().filter(|b| b.is_finite()).copied().collect(),
             images: self.images.iter().filter(|b| b.is_finite()).copied().collect(),
+            comic: self.comic.clone(),
         }
     }
 }
@@ -190,6 +195,9 @@ pub struct AnalysisOptions {
     /// Stitch paragraphs across column / page / box interruptions.
     #[serde(default = "default_true")]
     pub stitch: bool,
+    /// Comic pages read right to left (manga-style books).
+    #[serde(default)]
+    pub rtl: bool,
 }
 
 fn default_strategy() -> String {
@@ -210,6 +218,7 @@ impl Default for AnalysisOptions {
             manual: None,
             use_tags: true,
             stitch: true,
+            rtl: false,
         }
     }
 }
@@ -264,6 +273,9 @@ pub struct LayoutNode {
     /// candidate gaps, decision. Used by snapshots to tune the heuristics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diag: Option<CutDiag>,
+    /// Comic pages: `comic` (root), `panel`, `balloon` or `narration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

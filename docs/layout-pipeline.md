@@ -29,6 +29,7 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 | `reflow.rs` | Distribution of a translated paragraph over its segments |
 | `pipeline.rs` | Orchestration, statistics |
 | `ocr/` | Pages without a text layer: classification, PaddleOCR engine on `rten`, model download, OCR metrics (see [OCR](#ocr-ocr-srcocrjs)) |
+| `comic/` | Comic pages: panels, balloons / narration boxes / free text / sound effects, comic reading order (see [Comics](#comics-comic)) |
 
 ---
 
@@ -315,6 +316,78 @@ reference): CER 0.15 %, WER 1.1 %, 3.8 s per page in a release build
 (detection 0.5 s, recognition 3.2 s); the layout from the OCR runs matches the
 one from the text layer (same paragraphs, body size 9 pt).
 
+## Comics (`comic/`)
+
+Comic pages are scans (OCR) whose text lives in containers drawn on the
+artwork. The detection runs on the same raster as the OCR, right after it
+(`ocr_page`, about 0.3–0.5 s at 300 DPI), and returns a `ComicLayout` (panels
+and containers, PDF points) that the frontend stores in `PageInput.comic`.
+With a `comic` layout the pipeline skips XY-Cut and roles for that page
+(`comic/layout.rs`): one leaf per container, one translation unit each, never
+stitched.
+
+**Panels** (`comic/panels.rs`, on a ~1000 px work grid):
+
+1. background = median colour of the page border (white or yellowed paper);
+2. recursive XY-cut: a row/column is a gutter when ≥ 88 % of it is background
+   (a foot, a balloon or a title may cross it); a run of such rows is a cut if
+   part of it is connected to the page border, or if it is thin (≤ 3.5 % of
+   the page: pages framed as a whole) — a white sky inside a framed panel is
+   neither. Rows first (tiers), then columns;
+3. a cell that cannot be cut (round panels overlapping their neighbours,
+   gutters that stop half way) is split into the regions of artwork separated
+   by background, when there are several large ones;
+4. cells smaller than 8 % × 5 % of the page are dropped.
+
+**Containers** (`comic/balloons.rs`, full resolution, slightly blurred so
+halftone dots do not stop a fill):
+
+1. OCR lines are grouped into text blocks (stacked, small leading, similar
+   height);
+2. for each line, the background behind its letters (most frequent colour of
+   the lighter half of the line box) is flood-filled from the line; the
+   fill may cross the boxes of the block's lines on the same background
+   (tight leading leaves no path between lines);
+3. the fill *leaks* when it reaches the page edge, covers ≥ 60 % of its panel
+   (the panel background), or is more than 4× the padded text box (a
+   spotlight, a wall): the line is free text. Otherwise it is a container —
+   a **narration** box when the region fills ≥ 88 % of its box, a **balloon**
+   otherwise;
+4. lines whose fills cover the same region, or touch within one block on the
+   same background, or lie inside another container (bold words whose
+   background reads as ink) are one container;
+5. free text is grouped into blocks; blocks with letters ≥ 1.9× the dialogue
+   are **sfx**, the others **comic-text**; text with fewer than two letters
+   or digits is dropped (artwork read as text).
+
+**Comic page or not** (automatic mode): balloons hold at least half of the
+lines (≥ 2 balloons), or ≥ 2 panels covering 40 % of the page with at least one
+balloon. A prose page has no panels (the white leading cuts its lines apart)
+and its fills leak into the margins.
+
+**Reading order** (`comic/order.rs`, in the pipeline, so *Lettura fumetti*
+re-orders without a new detection): panels by recursive cuts on their boxes —
+tiers top to bottom, then columns left to right (right to left with
+`rtl`); containers outside every panel take part as their own slots. Inside
+a panel: the topmost container, unless a container on the reading side
+starts above its middle ("top-left first").
+
+**Layout tree**: root (`containerKind: "comic"`) → panels (`panel`) →
+balloons / narration boxes (`balloon` / `narration`, bordered) → leaf; free
+text and sound effects are leaves of the panel. Leaf roles: `balloon`,
+`narration`, `comic-text`, `sfx` (all translatable). Text runs are split by
+container before lines are built, so balloons side by side never share a
+line.
+
+OCR boxes of comic lettering are taller than the line pitch: the runs are
+thinned to 1.6× the distance to the neighbouring line, so consecutive lines
+are not read as one row (prose is unaffected: its pitch is larger).
+
+Measured on seven public-domain golden-age pages (Wikimedia Commons, ~140 DPI
+scans): grid layouts give the right panels and order; diagonal gutters and
+panels overlapping in a round frame give a single panel (the containers are
+still read top-left first). Detection takes 30–80 ms per page at that size.
+
 ## Tuning with snapshots
 
 Automatic thresholds are heuristics; the way to improve them is to collect
@@ -343,6 +416,11 @@ pages where manual settings do better and measure.
    image given to the OCR is saved as `<snapshot>_ocr.png`;
    `cli_analyze --eval-ocr` scores it, and `"maxOcrCer"` in the `ocr` section
    locks a page against regressions (copy the PNG along with the JSON).
+6. On comic pages the reference blocks are the containers in their reading
+   order. `cli_analyze --eval-comic` re-runs the panel/container detection on
+   the saved image with the saved OCR lines (OCR changes do not interfere) and
+   reports grouping F1 and order agreement for the stored and the current
+   detection; `"minAutoScore"` locks the grouping.
 
 ## Tests
 
@@ -373,3 +451,8 @@ cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
   font weight and style are not recognised (OCR runs are never bold/italic).
 * OCR runs on the whole document before the first analysis: a long scanned
   book takes a few seconds per page.
+* Comics: diagonal gutters and overlapping panels are not separated (one
+  panel); balloons with open outlines or touching artwork of the same colour
+  become free text; light text on dark boxes is not handled; the reading
+  direction is a document setting (no automatic RTL detection); titles drawn
+  as lettering are read as sound effects or balloons.

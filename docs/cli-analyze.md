@@ -20,6 +20,8 @@ cli_analyze --distribute [FILE]
 cli_analyze --eval [--json] SNAPSHOT_OR_DIR...
 cli_analyze --ocr IMAGE [--models DIR] [--det-max-side N] [--ref FILE] [--dpi N [--text]] [--json]
 cli_analyze --eval-ocr [--models DIR] [--det-max-side N] [--json] SNAPSHOT_OR_DIR...
+cli_analyze --ocr IMAGE --comic [--rtl] [--debug-png OUT] [--dpi N] [--text]
+cli_analyze --eval-comic [--json] SNAPSHOT_OR_DIR...
 ```
 
 `FILE` (or stdin when omitted) contains either
@@ -43,6 +45,10 @@ cli_analyze --eval-ocr [--models DIR] [--det-max-side N] [--json] SNAPSHOT_OR_DI
 | `--det-max-side N` | longer side of the detection input in pixels (default 1600) |
 | `--ref FILE` | with `--ocr`: reference transcription, one line per line; prints CER / WER |
 | `--dpi N` | with `--ocr`: convert the lines to text runs (pixels → points at N DPI) and run the layout pipeline |
+| `--comic` | with `--ocr`: detect panels and containers and lay the page out as a comic (default 72 DPI: points = pixels) |
+| `--rtl` | with `--comic`: read panels and balloons right to left |
+| `--debug-png OUT` | with `--comic`: draw panels (blue), balloons (green), narration (orange), sfx (magenta), free text (red) and OCR lines (grey) on the image |
+| `--eval-comic` | score the comic snapshots: stored vs re-detected panels and containers |
 
 ## Typical pipeline
 
@@ -144,6 +150,28 @@ and whitespace are normalised (`ocr::metrics`). `"maxOcrCer": 0.01` in the
 snapshot's `ocr` section makes `tests/snapshots.rs` fail when the current
 engine does worse (the OCR check is skipped when the models are not installed).
 
+## Comics (`--comic`, `--eval-comic`)
+
+```powershell
+cli_analyze --ocr page.jpg --comic --debug-png page_debug.png --text
+#   comic: 4 panels · 9 containers · looks like comic: true · 34 ms
+#     panel 0: [44,55 444x426]
+#     balloon    [575,58 121x68] HEY-YO / LITTLE-
+#   [par1 balloon] MEANWHILE, TROUBLE BREWS BY THE SIDE OF THE SLEEK BLACK BEAUTY.
+#   [par2 balloon] SO YOU WORK ROPES LOOSE?
+```
+
+Comic snapshots (a comic page saved with 📸 with its `_ocr.png`) are scored
+with the stored OCR lines, so only the comic detection is measured:
+
+```
+snapshot                                      page  ref |   stored F1/order/pan |  current F1/order/pan |    ms
+comic_test_p5_reference_20261125-151118.json     5    9 |   1.000 / 1.000 /   4 |   1.000 / 1.000 /   4 |   439
+```
+
+*F1* is the pairwise grouping of the lines into containers, *order* the share
+of reference container pairs read in the same order, *pan* the panels found.
+
 ## Input schema
 
 ### `PageInput`
@@ -155,6 +183,7 @@ engine does worse (the OCR check is skipped when the models are not installed).
 | `items` | `TextElement[]` | text runs |
 | `borderedBoxes` | `Bounds[]` | vector rectangles (optional) |
 | `images` | `Bounds[]` | placed images (optional) |
+| `comic` | `ComicLayout?` | comic page: `{ panels: Bounds[], balloons: [{ bounds, kind, lines? }], isComic }`, `kind` = `balloon` \| `narration` \| `comic-text` \| `sfx`; when present the page is laid out from it (no XY-Cut) |
 
 `page_bounds` / `bordered_boxes` are accepted as aliases.
 
@@ -186,9 +215,12 @@ boxes and images are dropped on input. A run painted twice at the same place
   "priority": "Y",
   "manual": { "thresholdX": 15, "thresholdY": 10, "minWidth": 20, "minHeight": 0 },
   "useTags": true,
-  "stitch": true
+  "stitch": true,
+  "rtl": false
 }
 ```
+
+`rtl` reads the panels and balloons of comic pages right to left.
 
 `manual` is optional; when present it replaces the automatic thresholds.
 

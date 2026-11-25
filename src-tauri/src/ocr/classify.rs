@@ -67,7 +67,7 @@ mod tests {
     use crate::model::{Bounds, TextElement};
 
     fn page(items: Vec<TextElement>, images: Vec<Bounds>) -> PageInput {
-        PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 600.0, h: 800.0 }, items, bordered_boxes: vec![], images }
+        PageInput { page_num: 1, page_bounds: Bounds { x: 0.0, y: 0.0, w: 600.0, h: 800.0 }, items, bordered_boxes: vec![], images, comic: None }
     }
     fn run(text: &str) -> TextElement {
         TextElement { text: text.into(), x: 10.0, y: 10.0, width: 100.0, height: 10.0, font_size: 10.0, ..Default::default() }

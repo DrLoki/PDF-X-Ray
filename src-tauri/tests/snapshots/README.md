@@ -11,3 +11,9 @@ il test fallisce se il motore OCR attuale supera quel tasso di errore sui caratt
 cartella dell'app o `PDFXRAY_MODEL_DIR`).
 
     cargo run --release --example cli_analyze -- --eval-ocr tests/snapshots
+
+Snapshot di fumetti: i blocchi di riferimento sono i balloon nel loro ordine di lettura. Il test rifà il
+rilevamento di vignette e balloon sull'immagine `_ocr.png` con le righe OCR salvate (non servono i modelli);
+con `"minAutoScore"` fallisce se il raggruppamento scende sotto la soglia.
+
+    cargo run --release --example cli_analyze -- --eval-comic tests/snapshots

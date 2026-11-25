@@ -19,6 +19,11 @@ const ROLE_COLORS = {
   table: '#facc15',
   'figure-text': '#fb923c',
   decoration: '#78716c',
+  // comic pages
+  balloon: '#22d3ee',
+  narration: '#f59e0b',
+  'comic-text': '#a3e635',
+  sfx: '#e879f9',
 };
 const roleColor = (r) => ROLE_COLORS[r] || '#34d399';
 
@@ -152,7 +157,7 @@ function cacheElements() {
     progressEta: 'progress-eta', progressBar: 'progress-bar',
     btnSnapshot: 'btn-snapshot', snapshotDialog: 'snapshot-dialog', snapPage: 'snap-page', snapSettings: 'snap-settings',
     snapNote: 'snap-note', snapPng: 'snap-png', autoHint: 'auto-hint',
-    selectOcrDoc: 'select-ocr-doc', selectOcrPage: 'select-ocr-page', ocrPageKind: 'ocr-page-kind', ocrHint: 'ocr-hint',
+    selectOcrDoc: 'select-ocr-doc', selectOcrPage: 'select-ocr-page', ocrPageKind: 'ocr-page-kind', ocrHint: 'ocr-hint', selectComicDir: 'select-comic-dir',
     ocrModelsDialog: 'ocr-models-dialog', ocrModelsWhy: 'ocr-models-why', ocrModelsFiles: 'ocr-models-files',
     ocrModelsWhere: 'ocr-models-where', snapOcr: 'snap-ocr', snapOcrText: 'snap-ocr-text',
     snapOcrTextLayerLabel: 'snap-ocr-textlayer-label',
@@ -211,16 +216,17 @@ function registerEvents() {
   el.chkStitch.addEventListener('change', runAnalysis);
   el.btnReanalyze.addEventListener('click', runAnalysis);
   el.selectOcrDoc.addEventListener('change', () => {
-    if (el.selectOcrDoc.value === 'ocr') state.ocrDeclined = false; // an explicit choice asks again
+    if (el.selectOcrDoc.value === 'ocr' || el.selectOcrDoc.value === 'comic') state.ocrDeclined = false; // an explicit choice asks again
     applyTextSources();
   });
   el.selectOcrPage.addEventListener('change', () => {
     const v = el.selectOcrPage.value;
     if (v) state.pageModes.set(state.pageNum, v);
     else state.pageModes.delete(state.pageNum);
-    if (v === 'ocr') state.ocrDeclined = false;
+    if (v === 'ocr' || v === 'comic') state.ocrDeclined = false;
     applyTextSources();
   });
+  el.selectComicDir.addEventListener('change', runAnalysis);
   el.snapOcrText.addEventListener('input', () => {
     el.snapshotDialog.querySelector('input[name="ocrref"][value="user"]').checked = true;
   });
@@ -480,11 +486,27 @@ async function extractDocument(token) {
 // Text source per page: PDF text layer or OCR
 // --------------------------------------------------------------------------
 
-/** 'text' | 'ocr' for a page: page override, else document mode, else the classification. */
+/**
+ * 'text' | 'ocr' | 'comic' for a page: page override, else document mode,
+ * else the classification (scans are OCR'd; the OCR result then tells
+ * whether the page is a comic page).
+ */
 function effectiveMode(p) {
   const mode = state.pageModes.get(p) || el.selectOcrDoc.value;
   if (mode !== 'auto') return mode;
-  return state.pageKinds.get(p)?.kind === 'scan' ? 'ocr' : 'text';
+  if (state.pageKinds.get(p)?.kind !== 'scan') return 'text';
+  return state.ocrResults.get(p)?.comic?.isComic ? 'comic' : 'ocr';
+}
+
+const usesOcr = (mode) => mode === 'ocr' || mode === 'comic';
+
+/** Page input built from the OCR of page `p` (comic layout included on comic pages). */
+function ocrPageInput(p) {
+  const r = state.ocrResults.get(p);
+  const input = { ...state.textLayer.get(p), items: r.items };
+  if (effectiveMode(p) === 'comic') input.comic = r.comic;
+  else delete input.comic;
+  return input;
 }
 
 async function classifyPages() {
@@ -510,7 +532,7 @@ async function prepareTextSources(token) {
   for (const p of order) {
     if (effectiveMode(p) === 'text' && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
   }
-  const todo = order.filter(p => effectiveMode(p) === 'ocr');
+  const todo = order.filter(p => usesOcr(effectiveMode(p)));
   const missing = todo.filter(p => !state.ocrResults.has(p));
   if (missing.length && !(await ensureOcrModels(missing.length))) {
     // without models the text layer stays in use
@@ -533,12 +555,11 @@ async function prepareTextSources(token) {
       console.error('OCR failed on page ' + p, err);
       setStatus(`OCR fallito a pagina ${p}: ${err}`, 'warn');
     }
-    if (state.ocrResults.has(p)) state.pageData.set(p, { ...state.textLayer.get(p), items: state.ocrResults.get(p).items });
+    if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
     if (p === state.pageNum) { drawOverlay(); refreshOcrControls(); }
   }
   for (const p of todo) {
-    const r = state.ocrResults.get(p);
-    if (r) state.pageData.set(p, { ...state.textLayer.get(p), items: r.items });
+    if (state.ocrResults.has(p)) state.pageData.set(p, ocrPageInput(p));
   }
   if (missing.length) progressOcr(missing.length, missing.length, missing[missing.length - 1], t0);
   refreshOcrControls();
@@ -624,15 +645,22 @@ function refreshOcrControls() {
   const kind = state.pageKinds.get(p);
   const mode = state.pdfDoc ? effectiveMode(p) : null;
   const res = state.ocrResults.get(p);
-  const usingOcr = mode === 'ocr' && res && state.pageData.get(p)?.items === res.items;
-  el.ocrPageKind.textContent = !kind ? '—' : (kind.kind === 'scan' ? 'scansione' : 'testo') + (usingOcr ? ' · OCR' : '');
+  const usingOcr = usesOcr(mode) && res && state.pageData.get(p)?.items === res.items;
+  const comic = usingOcr && mode === 'comic';
+  el.ocrPageKind.textContent = !kind ? '—' : (kind.kind === 'scan' ? 'scansione' : 'testo') + (comic ? ' · fumetto' : usingOcr ? ' · OCR' : '');
   if (!kind) { el.ocrHint.hidden = true; return; }
   let hint = `Classificazione: ${kind.reason}.`;
   if (usingOcr) {
     const s = ocrSummary(res);
     hint += ` OCR (${res.page.engine}, ${Math.round(res.dpi)} DPI): ${s.lines} righe, confidenza media ${(s.conf * 100).toFixed(1)}%` +
       (s.low ? `, ${s.low} righe incerte (in arancione con "Words")` : '') + ` · ${formatDuration(s.ms) || s.ms + ' ms'}.`;
-  } else if (mode === 'ocr') {
+    if (res.comic) {
+      const c = res.comic;
+      const count = (k) => c.balloons.filter(b => b.kind === k).length;
+      const found = `${c.panels.length} vignette, ${count('balloon')} balloon, ${count('narration')} didascalie, ${count('comic-text')} testi liberi, ${count('sfx')} onomatopee`;
+      hint += comic ? ` Fumetto: ${found}.` : c.isComic ? ` Sembra un fumetto (${found}).` : '';
+    }
+  } else if (usesOcr(mode)) {
     hint += state.ocrDeclined ? ' OCR non attivo: modelli non scaricati.' : ' OCR in attesa.';
   }
   el.ocrHint.textContent = hint;
@@ -668,6 +696,7 @@ function analysisOptions() {
     priority: state.priority,
     useTags: el.chkUseTags.checked,
     stitch: el.chkStitch.checked,
+    rtl: el.selectComicDir.value === 'rtl',
   };
   if (!el.chkAutoGutter.checked) {
     opts.manual = {
@@ -1015,7 +1044,14 @@ function drawOverlay() {
 
 function drawBlockRecursive(ctx, block, px) {
   const b = block.bounds;
-  if (block.isBorderedBox) {
+  const kind = block.containerKind;
+  if (kind === 'panel' || kind === 'balloon' || kind === 'narration') {
+    // comic pages: panels in blue, containers in the colour of their role
+    ctx.setLineDash([]);
+    ctx.strokeStyle = kind === 'panel' ? 'rgba(59, 130, 246, 0.85)' : roleColor(kind);
+    ctx.lineWidth = px(kind === 'panel' ? 2.5 : 2);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+  } else if (block.isBorderedBox) {
     ctx.setLineDash([]);
     ctx.strokeStyle = block.isTable ? 'rgba(250, 204, 21, 0.8)' : 'rgba(216, 180, 254, 0.85)';
     ctx.lineWidth = px(2);

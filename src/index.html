@@ -289,9 +289,10 @@
                 <span>Testo del documento</span>
               </div>
               <select id="select-ocr-doc" class="styled-select" title="Da dove prendere il testo delle pagine">
-                <option value="auto" selected>Automatico (OCR sulle scansioni)</option>
+                <option value="auto" selected>Automatico (OCR sulle scansioni, fumetti riconosciuti)</option>
                 <option value="text">Strato di testo del PDF</option>
                 <option value="ocr">OCR su tutte le pagine</option>
+                <option value="comic">Fumetto su tutte le pagine (OCR)</option>
               </select>
             </div>
             <div class="control-item">
@@ -303,6 +304,16 @@
                 <option value="" selected>Come il documento</option>
                 <option value="text">Strato di testo del PDF</option>
                 <option value="ocr">OCR</option>
+                <option value="comic">Fumetto (OCR, vignette e balloon)</option>
+              </select>
+            </div>
+            <div class="control-item">
+              <div class="control-label">
+                <span>Lettura fumetti</span>
+              </div>
+              <select id="select-comic-dir" class="styled-select" title="Ordine delle vignette e dei balloon nelle pagine a fumetti">
+                <option value="ltr" selected>Da sinistra a destra</option>
+                <option value="rtl">Da destra a sinistra (manga)</option>
               </select>
             </div>
             <div id="ocr-hint" class="auto-hint" hidden></div>

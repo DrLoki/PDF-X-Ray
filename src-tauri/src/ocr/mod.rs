@@ -80,6 +80,11 @@ pub const MIN_LINE_CONF: f32 = 0.5;
 /// calibrated against the text layer of digital pages (see tests).
 pub const BOX_HEIGHT_PER_EM: f32 = 1.3;
 
+/// A run is at most this many times the distance to the nearest line above
+/// or below (two runs of thickness `t` whose centres are `d` apart overlap by
+/// `t - d`: below half of `t` when `t < 2d`).
+const MAX_THICKNESS_PER_PITCH: f32 = 1.6;
+
 /// Convert recognised lines into text runs in PDF points.
 ///
 /// `scale` is image pixels per PDF point (DPI / 72). A horizontal line is
@@ -99,10 +104,25 @@ pub fn to_text_elements(page: &OcrPage, scale: f32) -> Vec<TextElement> {
     let thickness: Vec<f32> = page.lines.iter().map(|l| if l.rot == 0 { l.bounds.h } else { l.bounds.w }).collect();
     let weights: Vec<usize> = page.lines.iter().map(|l| l.text.chars().count()).collect();
     let norm = size_groups(&thickness, &weights);
+    let pitch: Vec<f32> = page
+        .lines
+        .iter()
+        .map(|a| {
+            page.lines
+                .iter()
+                .filter(|b| a.rot == 0 && b.rot == 0 && !std::ptr::eq(*b, a) && a.bounds.h_overlap(&b.bounds) > 0.0)
+                .map(|b| (a.bounds.cy() - b.bounds.cy()).abs())
+                .filter(|d| *d > 0.0)
+                .fold(f32::INFINITY, f32::min)
+        })
+        .collect();
     let mut out = Vec::new();
     for (li, line) in page.lines.iter().enumerate() {
-        let thick = norm[li];
-        let fs = thick * s / BOX_HEIGHT_PER_EM;
+        let fs = norm[li] * s / BOX_HEIGHT_PER_EM;
+        // tightly leaded lettering (comics): detected boxes are taller than
+        // the line pitch; keep neighbouring lines apart (less than half
+        // overlapping), or they would be read as one row
+        let thick = norm[li].min(pitch[li] * MAX_THICKNESS_PER_PITCH);
         let mut push = |text: String, b: Bounds| {
             // the normalised thickness, centred on the detected box
             let b = if line.rot == 0 {
@@ -199,6 +219,19 @@ mod tests {
 
     fn word(text: &str, x: f32, w: f32) -> OcrWord {
         OcrWord { text: text.into(), bounds: Bounds { x, y: 100.0, w, h: 40.0 } }
+    }
+
+    #[test]
+    fn tight_lines_stay_apart() {
+        // comic lettering: boxes 20 px tall, 10 px apart
+        let mk = |y: f32, t: &str| OcrLine { bounds: Bounds { x: 0.0, y, w: 100.0, h: 20.0 }, text: t.into(), conf: 1.0, det_score: 1.0, rot: 0, words: vec![] };
+        let page = OcrPage { engine: "t".into(), width: 200, height: 200, lines: vec![mk(0.0, "THE WAY IS"), mk(10.0, "DIFFICULT!")], detect_ms: 0, recognize_ms: 0 };
+        let el = to_text_elements(&page, 1.0);
+        assert!(el[0].height <= 16.0 + 1e-3 && el[1].height <= 16.0 + 1e-3, "{el:?}");
+        let overlap = el[0].y + el[0].height - el[1].y;
+        assert!(overlap < 0.5 * el[0].height);
+        let pl = crate::lines::build_lines(&el);
+        assert_eq!(crate::lines::group_rows(&pl.lines, &[0, 1]).len(), 2);
     }
 
     #[test]

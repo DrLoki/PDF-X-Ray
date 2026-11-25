@@ -10,8 +10,12 @@
 //! engine when the models are installed (`$PDFXRAY_MODEL_DIR` or the app's
 //! folder); `"ocr": { "maxOcrCer": 0.02 }` turns one into a regression test.
 //! Without the models (CI) the OCR part is skipped.
+//!
+//! Comic snapshots are re-detected on their stored image with the stored OCR
+//! lines (no models needed); with `"minAutoScore"` the current detection
+//! must group the lines at least that well.
 
-use pdf_xray_lib::eval::{evaluate, evaluate_ocr, Snapshot};
+use pdf_xray_lib::eval::{evaluate, evaluate_comic, evaluate_ocr, Snapshot};
 use pdf_xray_lib::ocr::OcrEngine;
 use std::fs;
 use std::path::PathBuf;
@@ -39,6 +43,20 @@ fn snapshots_do_not_regress() {
                 if r.auto_default.f1 + 1e-6 < min {
                     failures.push(format!("{name}: auto default {:.3} < minAutoScore {:.3}", r.auto_default.f1, min));
                 }
+            }
+        }
+        if let Some(r) = evaluate_comic(&snap, &f).unwrap_or_else(|e| panic!("{name}: {e}")) {
+            let line = |s: &pdf_xray_lib::eval::ComicScore| format!("F1 {:.3} order {:.3} panels {}", s.grouping.f1, s.order, s.panels);
+            match &r.current {
+                Some(c) => {
+                    println!("{name}: comic ref {} blocks | stored {} | current {}", r.reference_blocks, line(&r.stored), line(c));
+                    if let Some(min) = r.min_auto_score {
+                        if c.grouping.f1 + 1e-6 < min {
+                            failures.push(format!("{name}: comic F1 {:.3} < minAutoScore {:.3}", c.grouping.f1, min));
+                        }
+                    }
+                }
+                None => println!("{name}: comic stored {} (image not available: not re-run)", line(&r.stored)),
             }
         }
         let ocr = evaluate_ocr(&snap, &f, engine.as_ref().map(|e| e as &dyn OcrEngine)).unwrap_or_else(|e| panic!("{name}: {e}"));

@@ -3,6 +3,7 @@
 //! runs → lines → XY-Cut blocks → roles (page + cross-page) → units
 //! (paragraphs / structure elements) → stitched logical paragraphs.
 
+use crate::comic::layout::plan_comic_page;
 use crate::flow::{page_units, stitch, PageFlowInput, Unit};
 use crate::lines::{build_lines, group_rows, weighted_mode, Line, PageLines};
 use crate::model::*;
@@ -106,15 +107,32 @@ fn write_back(node: &mut LayoutNode, info: &HashMap<String, (&'static str, Vec<S
 pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> DocumentResult {
     let pages: Vec<PageInput> = pages.iter().map(PageInput::sanitized).collect();
     let pages = &pages[..];
+    // 0. comic pages are laid out from their panels and containers
+    let n = pages.len();
+    let mut comic_layouts: Vec<Option<PageLayout>> = (0..n).map(|_| None).collect();
+    let mut comic_roles: Vec<Option<Vec<&'static str>>> = vec![None; n];
     // 1. lines
-    let page_lines: Vec<PageLines> = pages.iter().map(|p| build_lines(&p.items)).collect();
+    let mut page_lines: Vec<PageLines> = Vec::with_capacity(n);
+    for (pi, p) in pages.iter().enumerate() {
+        match &p.comic {
+            Some(c) => {
+                let plan = plan_comic_page(p, c, opts.rtl);
+                comic_layouts[pi] = Some(plan.layout);
+                comic_roles[pi] = Some(plan.roles);
+                page_lines.push(plan.lines);
+            }
+            None => page_lines.push(build_lines(&p.items)),
+        }
+    }
+    let is_comic: Vec<bool> = comic_roles.iter().map(|r| r.is_some()).collect();
     let body_fs = weighted_mode(page_lines.iter().flat_map(|pl| pl.lines.iter().map(|l| (l.fs, l.chars()))), 10.0);
 
     // 2. layout
     let mut layouts: Vec<PageLayout> = pages
         .iter()
         .zip(&page_lines)
-        .map(|(p, pl)| layout_page(p.page_num, p.page_bounds, &pl.lines, &p.bordered_boxes, &p.images, opts))
+        .zip(comic_layouts)
+        .map(|((p, pl), cl)| cl.unwrap_or_else(|| layout_page(p.page_num, p.page_bounds, &pl.lines, &p.bordered_boxes, &p.images, opts)))
         .collect();
 
     let figures: Vec<Vec<Bounds>> = pages.iter().zip(&page_lines).map(|(p, pl)| figure_images(&p.images, &pl.lines, &p.page_bounds)).collect();
@@ -125,11 +143,15 @@ pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> Document
         .zip(&page_lines)
         .zip(&layouts)
         .zip(&figures)
-        .map(|(((p, pl), lay), figs)| lay.leaves.iter().map(|leaf| classify_leaf(&pl.lines, leaf, &p.page_bounds, figs, body_fs, opts.use_tags)).collect())
+        .zip(comic_roles)
+        .map(|((((p, pl), lay), figs), cr)| cr.unwrap_or_else(|| lay.leaves.iter().map(|leaf| classify_leaf(&pl.lines, leaf, &p.page_bounds, figs, body_fs, opts.use_tags)).collect()))
         .collect();
     if pages.len() > 1 {
         let mut cands = Vec::new();
         for (pi, ((p, pl), lay)) in pages.iter().zip(&page_lines).zip(&layouts).enumerate() {
+            if is_comic[pi] {
+                continue;
+            }
             cands.extend(running_candidates(pi, &pl.lines, &lay.leaves, &roles[pi], &p.page_bounds));
         }
         let mut hs: Vec<f32> = pages.iter().map(|p| p.page_bounds.h).collect();
@@ -143,7 +165,8 @@ pub fn analyze_document(pages: &[PageInput], opts: &AnalysisOptions) -> Document
     for pi in 0..pages.len() {
         let lay = &mut layouts[pi];
         let blocks: Vec<Bounds> = lay.leaves.iter().map(|l| l.bounds).collect();
-        let perm = crate::order::reading_order(&blocks, &roles[pi], &figures[pi]);
+        // comic pages come already in comic reading order
+        let perm = if is_comic[pi] { (0..blocks.len()).collect() } else { crate::order::reading_order(&blocks, &roles[pi], &figures[pi]) };
         lay.leaves = perm.iter().map(|&i| lay.leaves[i].clone()).collect();
         roles[pi] = perm.iter().map(|&i| roles[pi][i]).collect();
         let pos: HashMap<String, usize> = lay.leaves.iter().enumerate().map(|(k, l)| (l.id.clone(), k)).collect();

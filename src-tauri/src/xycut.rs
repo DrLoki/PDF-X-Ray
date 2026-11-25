@@ -451,6 +451,7 @@ impl<'a> Ctx<'a> {
                     paragraph_ids: None,
                     children: Some(children),
                     diag: Some(diag),
+                    container_kind: None,
                 };
             }
         }
@@ -500,6 +501,7 @@ impl<'a> Ctx<'a> {
             paragraph_ids: None,
             children: None,
             diag,
+            container_kind: None,
         }
     }
 }
@@ -746,6 +748,7 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
             paragraph_ids: None,
             children: Some(children),
             diag: None,
+            container_kind: None,
         });
     }
 
@@ -828,6 +831,7 @@ pub fn layout_page(page_num: u32, page_bounds: Bounds, lines: &[Line], boxes: &[
         children: Some(root_children),
         // the body's first cut is flattened into the root: keep its diagnostics
         diag: root_diag,
+        container_kind: None,
     };
     let mut order = Vec::new();
     walk_order(&mut root, &mut order);

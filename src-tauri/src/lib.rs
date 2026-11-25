@@ -1,3 +1,4 @@
+pub mod comic;
 pub mod eval;
 pub mod flow;
 pub mod lines;
@@ -146,6 +147,10 @@ struct OcrPageResult {
     items: Vec<TextElement>,
     /// Image pixels per PDF point.
     scale: f32,
+    /// Panels and text containers (PDF points); `isComic` is the verdict
+    /// used by the automatic page mode.
+    comic: comic::ComicLayout,
+    comic_ms: u64,
 }
 
 fn header<T: std::str::FromStr>(req: &tauri::ipc::Request<'_>, name: &str) -> Result<T, String> {
@@ -192,7 +197,10 @@ async fn ocr_page(app: tauri::AppHandle, state: tauri::State<'_, OcrState>, requ
         }
         let page = engine.recognize(&rgb)?;
         let items = ocr::to_text_elements(&page, scale);
-        Ok(OcrPageResult { page, items, scale })
+        let t = std::time::Instant::now();
+        let comic = comic::analyze(&rgb, &page.lines).scaled(1.0 / scale);
+        let comic_ms = t.elapsed().as_millis() as u64;
+        Ok(OcrPageResult { page, items, scale, comic, comic_ms })
     })
     .await
     .map_err(|e| e.to_string())?

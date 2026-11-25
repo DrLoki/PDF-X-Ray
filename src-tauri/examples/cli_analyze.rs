@@ -72,10 +72,12 @@ fn main() {
     let mut stitch = true;
     let mut ocr_image: Option<String> = None;
     let mut eval_ocr = false;
+    let mut eval_comic = false;
     let mut models: Option<String> = None;
     let mut det_max_side: Option<u32> = None;
     let mut ref_file: Option<String> = None;
     let mut dpi: Option<f32> = None;
+    let mut comic = ComicArgs::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -89,15 +91,20 @@ fn main() {
             "--no-stitch" => stitch = false,
             "--ocr" => ocr_image = it.next(),
             "--eval-ocr" => eval_ocr = true,
+            "--eval-comic" => eval_comic = true,
             "--models" => models = it.next(),
             "--det-max-side" => det_max_side = it.next().and_then(|v| v.parse().ok()),
             "--ref" => ref_file = it.next(),
             "--dpi" => dpi = it.next().and_then(|v| v.parse().ok()),
+            "--comic" => comic.on = true,
+            "--rtl" => comic.rtl = true,
+            "--debug-png" => comic.debug_png = it.next(),
             "-h" | "--help" => {
                 eprintln!("cli_analyze [--text] [--priority X|Y|max-gap] [--strategy combined|delta-x|zero-run|dominant-font] [--no-tags] [--no-stitch] [FILE]");
                 eprintln!("cli_analyze --distribute [FILE]");
                 eprintln!("cli_analyze --eval [--json] SNAPSHOT_OR_DIR...");
-                eprintln!("cli_analyze --ocr IMAGE [--models DIR] [--det-max-side N] [--ref FILE] [--dpi N [--text]] [--json]");
+                eprintln!("cli_analyze --ocr IMAGE [--models DIR] [--det-max-side N] [--ref FILE] [--dpi N [--text]] [--comic [--rtl] [--debug-png OUT]] [--json]");
+                eprintln!("cli_analyze --eval-comic [--json] SNAPSHOT_OR_DIR...");
                 eprintln!("cli_analyze --eval-ocr [--models DIR] [--json] SNAPSHOT_OR_DIR...");
                 return;
             }
@@ -112,12 +119,16 @@ fn main() {
         run_eval(&paths, json_out);
         return;
     }
+    if eval_comic {
+        run_eval_comic(&paths, json_out);
+        return;
+    }
     if eval_ocr {
         run_eval_ocr(&paths, models.as_deref(), det_max_side, json_out);
         return;
     }
     if let Some(img) = ocr_image {
-        run_ocr(&img, models.as_deref(), det_max_side, ref_file.as_deref(), dpi, text_mode, json_out);
+        run_ocr(&img, models.as_deref(), det_max_side, ref_file.as_deref(), dpi, text_mode, json_out, &comic);
         return;
     }
 
@@ -303,7 +314,58 @@ fn load_engine(models: Option<&str>, det_max_side: Option<u32>) -> pdf_xray_lib:
     engine
 }
 
-fn run_ocr(img: &str, models: Option<&str>, det_max_side: Option<u32>, ref_file: Option<&str>, dpi: Option<f32>, text_mode: bool, json_out: bool) {
+#[derive(Default)]
+struct ComicArgs {
+    on: bool,
+    rtl: bool,
+    debug_png: Option<String>,
+}
+
+/// Draw panels, containers and OCR lines on a copy of the page.
+fn comic_debug_png(rgb: &image::RgbImage, page: &pdf_xray_lib::ocr::OcrPage, layout: &pdf_xray_lib::comic::ComicLayout, out: &str) {
+    use pdf_xray_lib::model::Bounds;
+    let mut img = rgb.clone();
+    let mut rect = |b: &Bounds, c: [u8; 3], t: i64| {
+        let (w, h) = (img.width() as i64, img.height() as i64);
+        let (x0, y0, x1, y1) = (b.x as i64, b.y as i64, b.x1() as i64, b.y1() as i64);
+        for k in 0..t {
+            for x in x0..=x1 {
+                for y in [y0 + k, y1 - k] {
+                    if (0..w).contains(&x) && (0..h).contains(&y) {
+                        img.put_pixel(x as u32, y as u32, image::Rgb(c));
+                    }
+                }
+            }
+            for y in y0..=y1 {
+                for x in [x0 + k, x1 - k] {
+                    if (0..w).contains(&x) && (0..h).contains(&y) {
+                        img.put_pixel(x as u32, y as u32, image::Rgb(c));
+                    }
+                }
+            }
+        }
+    };
+    for p in &layout.panels {
+        rect(p, [0, 90, 255], 4);
+    }
+    for l in &page.lines {
+        rect(&l.bounds, [150, 150, 150], 1);
+    }
+    for b in &layout.balloons {
+        let c = match b.kind.as_str() {
+            "balloon" => [0, 200, 0],
+            "narration" => [255, 140, 0],
+            "sfx" => [220, 0, 220],
+            _ => [255, 0, 0],
+        };
+        rect(&b.bounds, c, 3);
+    }
+    img.save(out).unwrap_or_else(|e| eprintln!("{out}: {e}"));
+    eprintln!("debug image: {out}");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_ocr(img: &str, models: Option<&str>, det_max_side: Option<u32>, ref_file: Option<&str>, dpi: Option<f32>, text_mode: bool, json_out: bool, comic: &ComicArgs) {
     use pdf_xray_lib::ocr::OcrEngine;
     let engine = load_engine(models, det_max_side);
     let rgb = image::open(img)
@@ -316,16 +378,39 @@ fn run_ocr(img: &str, models: Option<&str>, det_max_side: Option<u32>, ref_file:
         eprintln!("OCR failed: {e}");
         std::process::exit(1)
     });
+    let dpi = if comic.on { dpi.or(Some(72.0)) } else { dpi };
     if let Some(dpi) = dpi {
         let scale = dpi / 72.0;
         let items = pdf_xray_lib::ocr::to_text_elements(&page, scale);
         let bounds = pdf_xray_lib::model::Bounds { x: 0.0, y: 0.0, w: rgb.width() as f32 / scale, h: rgb.height() as f32 / scale };
-        let input = PageInput { page_num: 1, page_bounds: bounds, items, bordered_boxes: vec![], images: vec![bounds] };
+        let layout = comic.on.then(|| {
+            let t = std::time::Instant::now();
+            let l = pdf_xray_lib::comic::analyze(&rgb, &page.lines);
+            eprintln!(
+                "comic: {} panels · {} containers · looks like comic: {} · {} ms",
+                l.panels.len(),
+                l.balloons.len(),
+                l.is_comic,
+                t.elapsed().as_millis()
+            );
+            for (k, p) in l.panels.iter().enumerate() {
+                eprintln!("  panel {k}: [{:.0},{:.0} {:.0}x{:.0}]", p.x, p.y, p.w, p.h);
+            }
+            for b in &l.balloons {
+                let t: Vec<&str> = b.lines.iter().map(|&i| page.lines[i].text.as_str()).collect();
+                eprintln!("  {:<10} [{:.0},{:.0} {:.0}x{:.0}] {}", b.kind, b.bounds.x, b.bounds.y, b.bounds.w, b.bounds.h, t.join(" / "));
+            }
+            if let Some(out) = &comic.debug_png {
+                comic_debug_png(&rgb, &page, &l, out);
+            }
+            l.scaled(1.0 / scale)
+        });
+        let input = PageInput { page_num: 1, page_bounds: bounds, items, bordered_boxes: vec![], images: vec![bounds], comic: layout };
         if json_out && !text_mode {
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "pages": [input] })).unwrap());
             return;
         }
-        let r = analyze_document(&[input], &AnalysisOptions::default());
+        let r = analyze_document(&[input], &AnalysisOptions { rtl: comic.rtl, ..AnalysisOptions::default() });
         for p in &r.paragraphs {
             println!("[{} {}] {}\n", p.id, p.role, p.text);
         }
@@ -362,6 +447,50 @@ fn run_ocr(img: &str, models: Option<&str>, det_max_side: Option<u32>, ref_file:
             s.missed_lines,
             s.extra_lines
         );
+    }
+}
+
+/// Comic snapshots: stored panels/containers vs a fresh detection on the stored image.
+fn run_eval_comic(paths: &[String], json_out: bool) {
+    use pdf_xray_lib::eval::{evaluate_comic, Snapshot};
+    let files = collect_snapshots(paths);
+    if files.is_empty() {
+        eprintln!("No snapshot files given.");
+        std::process::exit(1);
+    }
+    let mut results = Vec::new();
+    for f in &files {
+        let snap: Snapshot = match fs::read_to_string(f).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skip {}: {}", f.display(), e);
+                continue;
+            }
+        };
+        match evaluate_comic(&snap, f) {
+            Ok(Some(r)) => results.push((f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), r)),
+            Ok(None) => {}
+            Err(e) => eprintln!("skip {}: {}", f.display(), e),
+        }
+    }
+    if json_out {
+        let v: Vec<_> = results.iter().map(|(name, r)| serde_json::json!({ "snapshot": name, "result": r })).collect();
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+        return;
+    }
+    println!("{:<44} {:>5} {:>4} | {:>21} | {:>21} | {:>5}", "snapshot", "page", "ref", "stored F1/order/pan", "current F1/order/pan", "ms");
+    for (name, r) in &results {
+        let fmt = |s: &pdf_xray_lib::eval::ComicScore| format!("{:.3} / {:.3} / {:>3}", s.grouping.f1, s.order, s.panels);
+        let cur = r.current.as_ref().map(fmt).unwrap_or_else(|| "(no image)".into());
+        let ms = r.current_ms.map(|m| m.to_string()).unwrap_or_default();
+        let flag = match (r.min_auto_score, &r.current) {
+            (Some(min), Some(c)) if c.grouping.f1 + 1e-6 < min => "  < minAutoScore",
+            _ => "",
+        };
+        println!("{:<44} {:>5} {:>4} | {:>21} | {:>21} | {:>5}{}", name, r.page_num, r.reference_blocks, fmt(&r.stored), cur, ms, flag);
+    }
+    if results.is_empty() {
+        eprintln!("No comic snapshot with a reference.");
     }
 }
 
