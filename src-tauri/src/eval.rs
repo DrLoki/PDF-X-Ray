@@ -13,10 +13,21 @@
 //! with the pairs of the reference (1.0 = identical grouping). Lines are
 //! matched to blocks geometrically (centre in the smallest containing box),
 //! so the reference stays valid when the engine's internals change.
+//!
+//! OCR pages also carry an `ocr` section: the exact image given to the OCR
+//! (a PNG saved next to the JSON), the lines recognised at the time and a
+//! reference transcription (corrected by the user, confirmed as correct, or
+//! taken from the text layer of a digital page rasterised on purpose).
+//! [`evaluate_ocr`] runs the current OCR engine on that image again and
+//! scores both results with [`crate::ocr::metrics::score`], so changes to the
+//! engine are measured the same way as changes to the layout heuristics.
 
 use crate::model::{AnalysisOptions, Bounds, DocumentResult, LayoutNode, PageInput, PageResult};
+use crate::ocr::metrics::{score as ocr_score, OcrScore};
+use crate::ocr::{OcrEngine, OcrLine};
 use crate::pipeline::analyze_document;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +47,59 @@ pub struct Snapshot {
     /// settings score below this value.
     #[serde(default)]
     pub min_auto_score: Option<f32>,
+    /// Present when the page was recognised with OCR.
+    #[serde(default)]
+    pub ocr: Option<OcrSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrSnapshot {
+    /// Engine and model set that produced `lines`.
+    pub engine: String,
+    /// Resolution of the image (pixels per inch; pixels per point = dpi / 72).
+    pub dpi: f32,
+    /// File name of the PNG given to the OCR, next to the snapshot JSON.
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Lines recognised when the snapshot was taken (image pixels).
+    #[serde(default)]
+    pub lines: Vec<OcrLine>,
+    #[serde(default)]
+    pub reference: Option<OcrReference>,
+    /// Regression guard: the evaluation test fails if the current engine's
+    /// CER on this page is above this value.
+    #[serde(default)]
+    pub max_ocr_cer: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrReference {
+    /// `user` (corrected transcription), `ocr` (the OCR output confirmed as
+    /// correct) or `text-layer` (text layer of a digital page).
+    pub source: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrEvalResult {
+    pub file: Option<String>,
+    pub page_num: u32,
+    pub reference_source: String,
+    /// The lines stored in the snapshot.
+    pub stored_engine: String,
+    pub stored: OcrScore,
+    /// The current engine run on the stored image (absent without image).
+    pub current_engine: Option<String>,
+    pub current: Option<OcrScore>,
+    pub current_ms: Option<u64>,
+    pub max_ocr_cer: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -172,6 +236,41 @@ pub fn evaluate(snap: &Snapshot) -> Option<EvalResult> {
         auto_default: score_with(snap, &reference, &auto_default),
         min_auto_score: snap.min_auto_score,
     })
+}
+
+/// Score the OCR of a snapshot: the stored lines and, when `engine` is given
+/// and the image is next to the snapshot file (`ocr.image`, or
+/// `<snapshot name>_ocr.png`), a fresh run of the engine.
+/// `Ok(None)` when the snapshot has no OCR reference.
+pub fn evaluate_ocr(snap: &Snapshot, snapshot_path: &Path, engine: Option<&dyn OcrEngine>) -> Result<Option<OcrEvalResult>, String> {
+    let Some(ocr) = snap.ocr.as_ref() else { return Ok(None) };
+    let Some(reference) = ocr.reference.as_ref() else { return Ok(None) };
+    let stored_text: Vec<String> = ocr.lines.iter().map(|l| l.text.clone()).collect();
+    let stored = ocr_score(&reference.lines, &stored_text);
+    let (mut current, mut current_engine, mut current_ms) = (None, None, None);
+    let dir = snapshot_path.parent().unwrap_or(Path::new("."));
+    let stem = snapshot_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let image = ocr.image.as_ref().map(|n| dir.join(n)).filter(|p| p.is_file()).or_else(|| Some(dir.join(format!("{stem}_ocr.png"))).filter(|p| p.is_file()));
+    if let (Some(engine), Some(path)) = (engine, image) {
+        let img = image::open(&path).map_err(|e| format!("{}: {e}", path.display()))?.into_rgb8();
+        let t0 = std::time::Instant::now();
+        let page = engine.recognize(&img)?;
+        current_ms = Some(t0.elapsed().as_millis() as u64);
+        let text: Vec<String> = page.lines.iter().map(|l| l.text.clone()).collect();
+        current = Some(ocr_score(&reference.lines, &text));
+        current_engine = Some(engine.id());
+    }
+    Ok(Some(OcrEvalResult {
+        file: snap.file.clone(),
+        page_num: snap.page_num,
+        reference_source: reference.source.clone(),
+        stored_engine: ocr.engine.clone(),
+        stored,
+        current_engine,
+        current,
+        current_ms,
+        max_ocr_cer: ocr.max_ocr_cer,
+    }))
 }
 
 #[cfg(test)]

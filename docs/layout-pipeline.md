@@ -28,6 +28,7 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 | `flow.rs` | Paragraph split inside blocks, Tagged-PDF units, stitching |
 | `reflow.rs` | Distribution of a translated paragraph over its segments |
 | `pipeline.rs` | Orchestration, statistics |
+| `ocr/` | Pages without a text layer: classification, PaddleOCR engine on `rten`, model download, OCR metrics (see [OCR](#ocr-ocr-srcocrjs)) |
 
 ---
 
@@ -248,6 +249,72 @@ measured in the reading frame (`fb`), where the lines run horizontally.
 GianoReader uses `rot` to lay out the translation box in the text direction
 and rotate it like the original.
 
+## OCR (`ocr/`, `src/ocr.js`)
+
+Pages whose text is only in the pixels (scans, image-only pages) go through
+OCR; the recognised lines become ordinary `TextElement`s, so everything from
+§2 on is unchanged.
+
+```
+extract.js ─► classify_pages ─► (scan) rasterise 300 DPI ─► ocr_page ─► TextElements ─► pipeline
+                               (text) text layer as is
+```
+
+**Classification** (`ocr/classify.rs`). A page is a `scan` when its text layer
+has fewer than 40 visible characters and images cover at least half of it
+(union of the image boxes, sampled on a 48 × 48 grid, so image strips add
+up). Scans that already carry a text layer (an invisible OCR layer) keep it.
+The UI can override per document (*Automatico* / *Strato di testo* / *OCR su
+tutte le pagine*) and per page.
+
+**Rasterisation** (`src/ocr.js`). pdf.js renders the page on white at 300 DPI
+(at most 5000 px on the longer side); the RGBA pixels go to Rust as a raw IPC
+body (`ocr_page`, headers `x-width`, `x-height`, `x-scale` = pixels per point).
+
+**Engine** (`ocr/paddle.rs`, PaddleOCR PP-OCRv5 on `rten`, pure Rust, CPU):
+
+1. *Detection* (`PP-OCRv5_mobile_det`, DBNet): the image is resized to a longer
+   side of 1600 px (multiple of 32), normalised with the ImageNet mean/std in
+   BGR. The probability map is thresholded at 0.3; each connected region with
+   mean probability ≥ 0.6 becomes a box, grown by the DB unclip distance
+   (area × 1.5 / perimeter), since the model is trained on shrunk regions.
+2. *Recognition* (`latin_PP-OCRv5_mobile_rec`, CTC, 836 characters including
+   accented Latin letters): each box is cropped from the full-resolution image,
+   resized to height 48, normalised to [−1, 1], batched by aspect ratio and
+   decoded greedily (blank 0, dictionary, space). Boxes 1.5 × taller than wide
+   are also read rotated by ±90°; the most confident reading wins and sets
+   `rot` (vertical credits). Lines below 0.5 confidence are dropped.
+3. *Word boxes* come from the CTC time steps of each character.
+
+**To text runs** (`ocr::to_text_elements`). Box heights depend on the letters
+of a line (no ascenders → lower box), which the paragraph heuristics would
+read as size and leading changes. Lines are grouped around the modes of their
+thickness (±20 %, weighted by characters) and every line gets its group's
+median thickness, centred on the line; the font size is thickness / 1.3
+(calibrated on the text layer of digital pages). A line is split into several
+runs where two words are farther apart than the line height, so a box that
+crosses a gutter does not glue two columns. Runs carry `source: "ocr"` and
+`conf`; the **Words** overlay shows them in violet, orange below 0.8.
+
+**Models** (`ocr/models.rs`). Not in the installer: on first use the app
+shows the files (12.3 MB), their source and the destination folder, and
+downloads them only after confirmation (`ocr_download_models`, progress
+events). Mirrors: the project's GitHub release `models-v1`, then the official
+PaddlePaddle repositories on Hugging Face. Every file is checked against its
+SHA-256 before it is renamed into place. Recognition never uses the network.
+`$PDFXRAY_MODEL_DIR` overrides the folder (development, tests).
+
+**Measuring the OCR**. OCR snapshots store the exact image given to the
+engine and a reference transcription; `cli_analyze --eval-ocr` re-runs the
+current engine and reports CER / WER (`ocr/metrics.rs`: lines paired by edit
+distance regardless of order, typography normalised). See below and
+[`cli-analyze.md`](cli-analyze.md#ocr---ocr---eval-ocr).
+
+Measured on a 300 DPI rendering of a two-column RPG page (the text layer as
+reference): CER 0.15 %, WER 1.1 %, 3.8 s per page in a release build
+(detection 0.5 s, recognition 3.2 s); the layout from the OCR runs matches the
+one from the text layer (same paragraphs, body size 9 pt).
+
 ## Tuning with snapshots
 
 Automatic thresholds are heuristics; the way to improve them is to collect
@@ -269,6 +336,13 @@ pages where manual settings do better and measure.
 4. Copy representative snapshots to `src-tauri/tests/snapshots/`; adding
    `"minAutoScore": 0.95` to one turns it into a regression test
    (`tests/snapshots.rs`).
+5. On OCR pages the dialog also asks for the **reference text**: correct the
+   recognised lines in the text box, confirm them as correct, or (for a
+   digital page forced to OCR from *Questa pagina*) use the PDF text layer —
+   a free reference that makes any digital PDF a test set for the OCR. The
+   image given to the OCR is saved as `<snapshot>_ocr.png`;
+   `cli_analyze --eval-ocr` scores it, and `"maxOcrCer"` in the `ocr` section
+   locks a page against regressions (copy the PNG along with the JSON).
 
 ## Tests
 
@@ -292,4 +366,10 @@ cargo test --manifest-path src-tauri/Cargo.toml   # or: npm test
   (no dictionary): a real compound split at a line end loses its hyphen.
 * Tables are detected only from ruled grids; borderless tables are segmented
   as text blocks.
-* Text in vector outlines or scanned pages is not visible to the engine (no OCR).
+* Text drawn as vector outlines (no text layer, no image) is not detected as
+  needing OCR: force OCR on those pages from the interface.
+* OCR: Latin script only; no reading of text on curved baselines; a large
+  drop cap is often not detected (the first letter of the paragraph is lost);
+  font weight and style are not recognised (OCR runs are never bold/italic).
+* OCR runs on the whole document before the first analysis: a long scanned
+  book takes a few seconds per page.

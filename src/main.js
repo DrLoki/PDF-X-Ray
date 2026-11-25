@@ -2,6 +2,7 @@ import * as pdfjsLib from './assets/pdfjs/pdf.min.mjs';
 import { extractPage } from './extract.js';
 import { serializeLayoutTree, serializeUnits, serializeParagraphsText, parseTranslations } from './export.js';
 import { pseudoTranslate, renderTranslationLayer } from './translate.js';
+import { rasterizePage, recognizeCanvas, formatBytes, ocrSummary, LOW_CONF, OCR_DPI } from './ocr.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdfjs/pdf.worker.min.mjs';
 
@@ -33,6 +34,11 @@ const state = {
   loadToken: 0,
 
   pageData: new Map(),       // pageNum → PageInput sent to Rust (PDF points)
+  textLayer: new Map(),      // pageNum → PageInput as extracted from the PDF (text layer)
+  pageKinds: new Map(),      // pageNum → { kind: 'text'|'scan', chars, imageCover, reason }
+  ocrResults: new Map(),     // pageNum → { page, items, scale, dpi } from `ocr_page`
+  pageModes: new Map(),      // pageNum → 'text'|'ocr' (overrides the document mode)
+  ocrDeclined: false,        // the user refused the model download in this session
   extractionDone: false,
   doc: null,                 // DocumentResult
   pageResults: new Map(),    // pageNum → PageResult
@@ -146,6 +152,10 @@ function cacheElements() {
     progressEta: 'progress-eta', progressBar: 'progress-bar',
     btnSnapshot: 'btn-snapshot', snapshotDialog: 'snapshot-dialog', snapPage: 'snap-page', snapSettings: 'snap-settings',
     snapNote: 'snap-note', snapPng: 'snap-png', autoHint: 'auto-hint',
+    selectOcrDoc: 'select-ocr-doc', selectOcrPage: 'select-ocr-page', ocrPageKind: 'ocr-page-kind', ocrHint: 'ocr-hint',
+    ocrModelsDialog: 'ocr-models-dialog', ocrModelsWhy: 'ocr-models-why', ocrModelsFiles: 'ocr-models-files',
+    ocrModelsWhere: 'ocr-models-where', snapOcr: 'snap-ocr', snapOcrText: 'snap-ocr-text',
+    snapOcrTextLayerLabel: 'snap-ocr-textlayer-label',
   };
   for (const [k, id] of Object.entries(ids)) el[k] = document.getElementById(id);
 }
@@ -200,6 +210,20 @@ function registerEvents() {
   el.chkUseTags.addEventListener('change', runAnalysis);
   el.chkStitch.addEventListener('change', runAnalysis);
   el.btnReanalyze.addEventListener('click', runAnalysis);
+  el.selectOcrDoc.addEventListener('change', () => {
+    if (el.selectOcrDoc.value === 'ocr') state.ocrDeclined = false; // an explicit choice asks again
+    applyTextSources();
+  });
+  el.selectOcrPage.addEventListener('change', () => {
+    const v = el.selectOcrPage.value;
+    if (v) state.pageModes.set(state.pageNum, v);
+    else state.pageModes.delete(state.pageNum);
+    if (v === 'ocr') state.ocrDeclined = false;
+    applyTextSources();
+  });
+  el.snapOcrText.addEventListener('input', () => {
+    el.snapshotDialog.querySelector('input[name="ocrref"][value="user"]').checked = true;
+  });
   el.btnSnapshot.addEventListener('click', openSnapshotDialog);
   el.snapshotDialog.addEventListener('close', () => {
     if (el.snapshotDialog.returnValue === 'save') saveSnapshot();
@@ -389,6 +413,10 @@ async function loadPDFFile(file) {
     state.totalPageCount = state.pdfDoc.numPages;
     state.pageNum = 1;
     state.pageData.clear();
+    state.textLayer.clear();
+    state.pageKinds.clear();
+    state.ocrResults.clear();
+    state.pageModes.clear();
     state.pageResults.clear();
     state.paraById.clear();
     state.doc = null;
@@ -433,6 +461,7 @@ async function extractDocument(token) {
         console.warn('Extraction failed on page ' + p, err);
         state.pageData.set(p, { pageNum: p, pageBounds: { x: 0, y: 0, w: 1, h: 1 }, items: [], borderedBoxes: [], images: [] });
       }
+      state.textLayer.set(p, state.pageData.get(p));
     }
     done++;
     if (done === 1) drawOverlay();
@@ -441,7 +470,173 @@ async function extractDocument(token) {
   }
   if (token !== state.loadToken) return;
   state.extractionDone = true;
-  await runAnalysis(true);
+  await classifyPages();
+  const ocrRan = await prepareTextSources(token);
+  if (token !== state.loadToken) return;
+  await runAnalysis(!ocrRan);
+}
+
+// --------------------------------------------------------------------------
+// Text source per page: PDF text layer or OCR
+// --------------------------------------------------------------------------
+
+/** 'text' | 'ocr' for a page: page override, else document mode, else the classification. */
+function effectiveMode(p) {
+  const mode = state.pageModes.get(p) || el.selectOcrDoc.value;
+  if (mode !== 'auto') return mode;
+  return state.pageKinds.get(p)?.kind === 'scan' ? 'ocr' : 'text';
+}
+
+async function classifyPages() {
+  if (!isTauri()) return;
+  const pages = [...state.textLayer.values()];
+  try {
+    const kinds = await window.__TAURI__.core.invoke('classify_pages', { pages });
+    state.pageKinds = new Map(kinds.map(k => [k.pageNum, k]));
+  } catch (err) {
+    console.warn('Page classification failed:', err);
+  }
+}
+
+/**
+ * Make `pageData` follow the text source of every page: OCR the pages that
+ * need it (asking for the models first), restore the text layer elsewhere.
+ * Returns true when the OCR ran (the progress bar then restarts for the analysis).
+ */
+async function prepareTextSources(token) {
+  if (!isTauri()) return false;
+  const n = state.totalPageCount;
+  const order = [state.pageNum, ...Array.from({ length: n }, (_, i) => i + 1).filter(p => p !== state.pageNum)];
+  for (const p of order) {
+    if (effectiveMode(p) === 'text' && state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+  }
+  const todo = order.filter(p => effectiveMode(p) === 'ocr');
+  const missing = todo.filter(p => !state.ocrResults.has(p));
+  if (missing.length && !(await ensureOcrModels(missing.length))) {
+    // without models the text layer stays in use
+    for (const p of todo) if (state.textLayer.has(p)) state.pageData.set(p, state.textLayer.get(p));
+    refreshOcrControls();
+    return false;
+  }
+  let ran = false;
+  const t0 = performance.now();
+  for (let k = 0; k < missing.length; k++) {
+    if (token !== state.loadToken) return ran;
+    const p = missing[k];
+    progressOcr(k, missing.length, p, t0);
+    try {
+      const raster = await rasterizePage(state.pdfDoc, p, OCR_DPI);
+      const res = await recognizeCanvas(window.__TAURI__.core.invoke, raster);
+      state.ocrResults.set(p, { ...res, dpi: raster.dpi });
+      ran = true;
+    } catch (err) {
+      console.error('OCR failed on page ' + p, err);
+      setStatus(`OCR fallito a pagina ${p}: ${err}`, 'warn');
+    }
+    if (state.ocrResults.has(p)) state.pageData.set(p, { ...state.textLayer.get(p), items: state.ocrResults.get(p).items });
+    if (p === state.pageNum) { drawOverlay(); refreshOcrControls(); }
+  }
+  for (const p of todo) {
+    const r = state.ocrResults.get(p);
+    if (r) state.pageData.set(p, { ...state.textLayer.get(p), items: r.items });
+  }
+  if (missing.length) progressOcr(missing.length, missing.length, missing[missing.length - 1], t0);
+  refreshOcrControls();
+  return ran;
+}
+
+/** Re-apply the text sources after a change of mode, then re-analyse. */
+async function applyTextSources() {
+  refreshOcrControls();
+  if (!state.pdfDoc || !state.extractionDone) return;
+  const token = state.loadToken;
+  const ocrRan = await prepareTextSources(token);
+  if (token !== state.loadToken) return;
+  await runAnalysis(false);
+}
+
+function progressOcr(done, total, pageNum, t0) {
+  const elapsed = performance.now() - t0;
+  const per = done ? elapsed / done : null;
+  const eta = per === null ? 'stima in corso…' : done >= total ? '' : `~${formatDuration(per * (total - done))} rimanenti`;
+  paintProgress('OCR', `pagina ${pageNum} · ${done}/${total}`, total ? done / total : 1, eta, done === 0);
+  setStatus(done >= total ? `OCR completato: ${total} pagine` : `OCR ${done}/${total}…`);
+}
+
+/** Ask for the model download when the models are missing. Resolves to true when they are installed. */
+async function ensureOcrModels(pages) {
+  const invoke = window.__TAURI__.core.invoke;
+  let status;
+  try {
+    status = await invoke('ocr_models_status');
+  } catch (err) {
+    setStatus('OCR non disponibile: ' + err, 'warn');
+    return false;
+  }
+  if (status.installed) return true;
+  if (state.ocrDeclined) return false;
+
+  el.ocrModelsWhy.textContent = `${pages} ${pages === 1 ? 'pagina non ha' : 'pagine non hanno'} testo selezionabile e ${pages === 1 ? 'richiede' : 'richiedono'} l'OCR.`;
+  el.ocrModelsFiles.innerHTML = '';
+  for (const f of status.files.filter(f => !f.present)) {
+    const li = document.createElement('li');
+    li.textContent = `${f.name} · ${f.role} · ${formatBytes(f.size)}`;
+    el.ocrModelsFiles.appendChild(li);
+  }
+  el.ocrModelsWhere.textContent = `Totale ${formatBytes(status.missingBytes)} da ${status.sources.join(' (o ')}${status.sources.length > 1 ? ')' : ''}, salvati in ${status.dir}.`;
+  const answer = await new Promise((resolve) => {
+    el.ocrModelsDialog.addEventListener('close', () => resolve(el.ocrModelsDialog.returnValue), { once: true });
+    el.ocrModelsDialog.returnValue = '';
+    el.ocrModelsDialog.showModal();
+  });
+  if (answer !== 'download') {
+    state.ocrDeclined = true;
+    setStatus('OCR non attivo: modelli non scaricati. Le pagine senza testo restano vuote.', 'warn');
+    return false;
+  }
+
+  let unlisten = null;
+  try {
+    paintProgress('Download modelli OCR', 'connessione…', 0, '', true);
+    unlisten = await window.__TAURI__.event.listen('ocr-download-progress', (e) => {
+      const { file, total, done } = e.payload;
+      paintProgress('Download modelli OCR', `${file} · ${formatBytes(done)} / ${formatBytes(total)}`, total ? done / total : 0, '');
+    });
+    await invoke('ocr_download_models');
+    setStatus('Modelli OCR installati.', 'ok');
+    return true;
+  } catch (err) {
+    console.error('Model download failed:', err);
+    progressFail('download dei modelli OCR fallito');
+    setStatus('Download dei modelli OCR fallito: ' + err, 'warn');
+    alert('Download dei modelli OCR fallito:\n' + err);
+    return false;
+  } finally {
+    if (unlisten) unlisten();
+  }
+}
+
+/** Page selector, page kind badge and OCR summary for the current page. */
+function refreshOcrControls() {
+  if (!el.selectOcrPage) return;
+  const p = state.pageNum;
+  el.selectOcrPage.value = state.pageModes.get(p) || '';
+  const kind = state.pageKinds.get(p);
+  const mode = state.pdfDoc ? effectiveMode(p) : null;
+  const res = state.ocrResults.get(p);
+  const usingOcr = mode === 'ocr' && res && state.pageData.get(p)?.items === res.items;
+  el.ocrPageKind.textContent = !kind ? '—' : (kind.kind === 'scan' ? 'scansione' : 'testo') + (usingOcr ? ' · OCR' : '');
+  if (!kind) { el.ocrHint.hidden = true; return; }
+  let hint = `Classificazione: ${kind.reason}.`;
+  if (usingOcr) {
+    const s = ocrSummary(res);
+    hint += ` OCR (${res.page.engine}, ${Math.round(res.dpi)} DPI): ${s.lines} righe, confidenza media ${(s.conf * 100).toFixed(1)}%` +
+      (s.low ? `, ${s.low} righe incerte (in arancione con "Words")` : '') + ` · ${formatDuration(s.ms) || s.ms + ' ms'}.`;
+  } else if (mode === 'ocr') {
+    hint += state.ocrDeclined ? ' OCR non attivo: modelli non scaricati.' : ' OCR in attesa.';
+  }
+  el.ocrHint.textContent = hint;
+  el.ocrHint.hidden = false;
 }
 
 async function buildPageRefMap(token) {
@@ -589,6 +784,7 @@ async function renderPage(num) {
 }
 
 function refreshPageUI() {
+  refreshOcrControls();
   syncAutoSliders();
   renderLayoutDOMTree();
   renderParagraphList();
@@ -771,10 +967,13 @@ function drawOverlay() {
   const pr = currentPageResult();
 
   if (el.chkShowChars.checked && data) {
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
-    ctx.fillStyle = 'rgba(56, 189, 248, 0.04)';
     ctx.lineWidth = px(1);
     for (const it of data.items) {
+      // OCR runs: violet, orange when the recognition is uncertain
+      const ocr = it.source === 'ocr';
+      const low = ocr && it.conf < LOW_CONF;
+      ctx.strokeStyle = low ? 'rgba(251, 146, 60, 0.9)' : ocr ? 'rgba(167, 139, 250, 0.5)' : 'rgba(56, 189, 248, 0.25)';
+      ctx.fillStyle = low ? 'rgba(251, 146, 60, 0.12)' : ocr ? 'rgba(167, 139, 250, 0.06)' : 'rgba(56, 189, 248, 0.04)';
       ctx.fillRect(it.x, it.y, it.width, it.height);
       ctx.strokeRect(it.x, it.y, it.width, it.height);
     }
@@ -1455,7 +1654,56 @@ function openSnapshotDialog() {
   const manual = !!state.docOptions?.manual;
   el.snapshotDialog.querySelector(`input[name="verdict"][value="${manual ? 'manual-better' : 'reference'}"]`).checked = true;
   el.snapNote.value = '';
+  // OCR pages: reference transcription for the OCR evaluation
+  const ocr = currentOcr();
+  el.snapOcr.hidden = !ocr;
+  if (ocr) {
+    el.snapOcrText.value = ocr.page.lines.map(l => l.text).join('\n');
+    const hasLayer = (state.pageKinds.get(state.pageNum)?.chars || 0) >= 40;
+    el.snapOcrTextLayerLabel.hidden = !hasLayer;
+    el.snapshotDialog.querySelector(`input[name="ocrref"][value="${hasLayer ? 'text-layer' : 'user'}"]`).checked = true;
+  }
   el.snapshotDialog.showModal();
+}
+
+/** OCR result in use on the current page, or null. */
+function currentOcr() {
+  const p = state.pageNum;
+  const res = state.ocrResults.get(p);
+  return res && state.pageData.get(p)?.items === res.items ? res : null;
+}
+
+/** OCR section of a snapshot: engine, image, lines and the reference chosen in the dialog. */
+async function ocrSnapshot(pageNum, res, stem) {
+  const choice = el.snapshotDialog.querySelector('input[name="ocrref"]:checked')?.value || 'none';
+  let reference = null;
+  if (choice === 'user') {
+    reference = { source: 'user', lines: el.snapOcrText.value.split('\n').map(s => s.trim()).filter(Boolean) };
+  } else if (choice === 'ocr') {
+    reference = { source: 'ocr', lines: res.page.lines.map(l => l.text) };
+  } else if (choice === 'text-layer') {
+    // the lines the layout engine builds from the PDF text layer of the same page
+    const layer = state.textLayer.get(pageNum);
+    const doc = await window.__TAURI__.core.invoke('analyze_document', { pages: [layer], options: state.docOptions });
+    const pr = doc.pages.find(p => p.pageNum === pageNum);
+    reference = { source: 'text-layer', lines: (pr?.lines || []).map(l => l.text).filter(t => t.trim()) };
+  }
+  // the exact image given to the OCR (same DPI, same renderer), for --eval-ocr
+  const raster = await rasterizePage(state.pdfDoc, pageNum, res.dpi);
+  return {
+    section: {
+      engine: res.page.engine,
+      dpi: res.dpi,
+      image: `${stem}_ocr.png`,
+      width: res.page.width,
+      height: res.page.height,
+      detectMs: res.page.detectMs,
+      recognizeMs: res.page.recognizeMs,
+      lines: res.page.lines,
+      reference,
+    },
+    png: raster.canvas.toDataURL('image/png'),
+  };
 }
 
 function leafSummaries(root) {
@@ -1566,11 +1814,19 @@ async function saveSnapshot() {
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
     const base = (state.fileName || 'document').replace(/\.pdf$/i, '').slice(0, 40);
     const stem = `${base}_p${pageNum}_${verdict}_${stamp}`;
-    const json = JSON.stringify(snapshot, null, 1);
     const png = el.snapPng.checked ? viewPng() : null;
+    let ocrPng = null;
+    const ocrRes = currentOcr();
+    if (ocrRes && isTauri()) {
+      setStatus('Snapshot: immagine OCR…');
+      const o = await ocrSnapshot(pageNum, ocrRes, stem.replace(/[^\p{L}\p{N}._-]/gu, '_'));
+      snapshot.ocr = o.section;
+      ocrPng = o.png;
+    }
+    const json = JSON.stringify(snapshot, null, 1);
 
     if (isTauri()) {
-      const path = await invoke('save_snapshot', { fileStem: stem, json, pngBase64: png });
+      const path = await invoke('save_snapshot', { fileStem: stem, json, pngBase64: png, ocrPngBase64: ocrPng });
       setStatus(`Snapshot salvato: ${path}`, 'ok');
       try { await window.__TAURI__.opener?.revealItemInDir(path); } catch (_) { /* best effort */ }
     } else {

@@ -1338,6 +1338,22 @@ input[type=range]::-webkit-slider-thumb:hover {
   margin-bottom: 8px;
 }
 .snap-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.snapshot-dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
+.snap-verdict[hidden], .snap-verdict label[hidden] { display: none; }
+#snap-ocr-text {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  background: var(--bg-control);
+  color: var(--color-text);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  font: 0.75rem/1.45 var(--font-mono);
+  white-space: pre;
+  overflow-x: auto;
+}
+#ocr-models-files { list-style: none; display: flex; flex-direction: column; gap: 2px; }
 
 .auto-hint {
   font-size: 0.7rem;

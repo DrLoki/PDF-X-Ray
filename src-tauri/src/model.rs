@@ -104,6 +104,13 @@ pub struct TextElement {
     /// older inputs.
     #[serde(default)]
     pub rot: Option<f32>,
+    /// `ocr` when the run was recognised from the page image; absent for
+    /// runs of the PDF text layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// OCR recognition confidence of the run (0–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conf: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

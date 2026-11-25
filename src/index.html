@@ -283,6 +283,30 @@
               </label>
             </div>
 
+            <!-- Text source: PDF text layer or OCR -->
+            <div class="control-item">
+              <div class="control-label">
+                <span>Testo del documento</span>
+              </div>
+              <select id="select-ocr-doc" class="styled-select" title="Da dove prendere il testo delle pagine">
+                <option value="auto" selected>Automatico (OCR sulle scansioni)</option>
+                <option value="text">Strato di testo del PDF</option>
+                <option value="ocr">OCR su tutte le pagine</option>
+              </select>
+            </div>
+            <div class="control-item">
+              <div class="control-label">
+                <span>Questa pagina</span>
+                <span class="control-val" id="ocr-page-kind">—</span>
+              </div>
+              <select id="select-ocr-page" class="styled-select" title="Eccezione per la pagina corrente">
+                <option value="" selected>Come il documento</option>
+                <option value="text">Strato di testo del PDF</option>
+                <option value="ocr">OCR</option>
+              </select>
+            </div>
+            <div id="ocr-hint" class="auto-hint" hidden></div>
+
             <div class="engine-actions">
               <button id="btn-reanalyze" class="btn secondary-btn">Rielabora documento</button>
               <button id="btn-snapshot" class="btn secondary-btn" title="Salva impostazioni, dati della pagina e risultati (manuale vs automatico) per tarare le euristiche">📸 Snapshot</button>
@@ -341,10 +365,35 @@
         </fieldset>
         <label class="snap-note-label" for="snap-note">Nota: cosa è sbagliato, cosa ti aspetti</label>
         <textarea id="snap-note" rows="4" placeholder="es. con le soglie automatiche le due colonne restano unite in un solo blocco dopo l'elenco numerato"></textarea>
+        <fieldset class="snap-verdict" id="snap-ocr" hidden>
+          <legend>OCR: testo di riferimento</legend>
+          <p class="snap-help">Lo snapshot include l'immagine passata all'OCR, così <code>cli_analyze --eval-ocr</code> può
+            rieseguire il motore e misurarne gli errori (CER/WER) rispetto al riferimento.</p>
+          <label><input type="radio" name="ocrref" value="user" checked /> Ho corretto il testo qui sotto (una riga per riga)</label>
+          <label><input type="radio" name="ocrref" value="ocr" /> Il testo dell'OCR è corretto così com'è</label>
+          <label id="snap-ocr-textlayer-label"><input type="radio" name="ocrref" value="text-layer" /> Usa lo strato di testo del PDF (scansione simulata)</label>
+          <label><input type="radio" name="ocrref" value="none" /> Non valutare l'OCR di questa pagina</label>
+          <textarea id="snap-ocr-text" rows="10" spellcheck="false"></textarea>
+        </fieldset>
         <label class="checkbox-container small"><input type="checkbox" id="snap-png" checked /><span class="checkmark"></span>Includi immagine della vista (PNG)</label>
         <div class="snap-buttons">
           <button value="cancel" class="btn secondary-btn" formnovalidate>Annulla</button>
           <button value="save" id="snap-save" class="btn primary-btn">Salva snapshot</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="ocr-models-dialog" class="snapshot-dialog">
+      <form method="dialog">
+        <h3>🔤 Modelli OCR</h3>
+        <p class="snap-help" id="ocr-models-why"></p>
+        <p class="snap-help">Per riconoscere il testo serve scaricare una volta i modelli <strong>PaddleOCR PP-OCRv5</strong>
+          (alfabeto latino, licenza Apache-2.0). Dopo il download l'OCR funziona offline: le pagine non lasciano il computer.</p>
+        <ul id="ocr-models-files" class="snap-settings"></ul>
+        <p class="snap-help" id="ocr-models-where"></p>
+        <div class="snap-buttons">
+          <button value="cancel" class="btn secondary-btn" formnovalidate>Non ora</button>
+          <button value="download" class="btn primary-btn" id="ocr-models-download">Scarica</button>
         </div>
       </form>
     </dialog>
