@@ -136,7 +136,7 @@ pub fn plan_comic_page(page: &PageInput, comic: &ComicLayout, rtl: bool) -> Comi
         let rows = group_rows(&lines, &c.lines);
         let ordered: Vec<usize> = rows.iter().flatten().copied().collect();
         let tb = Bounds::union_all(c.lines.iter().map(|&i| &lines[i].b)).unwrap_or(c.bounds);
-        let text = rows.iter().map(|r| r.iter().map(|&i| lines[i].text.as_str()).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n");
+        let text = rows.iter().map(|r| crate::text::join_words(r.iter().map(|&i| lines[i].text.as_str()))).collect::<Vec<_>>().join("\n");
         let formatting = leaf_formatting(&lines, &rows, &tb);
         leaves.push(Leaf { id: id.clone(), lines: ordered, bounds: tb, box_kind: None, box_id: None });
         roles.push(c.kind);

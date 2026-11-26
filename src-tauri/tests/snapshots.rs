@@ -28,7 +28,8 @@ fn snapshots_do_not_regress() {
     };
     let mut files: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|x| x == "json").unwrap_or(false)).collect();
     files.sort();
-    let engine = pdf_xray_lib::ocr::models::default_model_dir().and_then(|d| pdf_xray_lib::ocr::load_engine(&d).ok());
+    // engines by model set, loaded on demand (absent when the models are not installed)
+    let mut engines: std::collections::HashMap<&str, Option<pdf_xray_lib::ocr::paddle::PaddleOcr>> = std::collections::HashMap::new();
     let mut failures = Vec::new();
     for f in files {
         let text = fs::read_to_string(&f).unwrap();
@@ -59,6 +60,14 @@ fn snapshots_do_not_regress() {
                 None => println!("{name}: comic stored {} (image not available: not re-run)", line(&r.stored)),
             }
         }
+        let set = snap
+            .ocr
+            .as_ref()
+            .and_then(|o| pdf_xray_lib::ocr::models::set_for_engine(&o.engine))
+            .unwrap_or(&pdf_xray_lib::ocr::models::LATIN);
+        let engine = engines
+            .entry(set.id)
+            .or_insert_with(|| pdf_xray_lib::ocr::models::default_model_dir(set).and_then(|d| pdf_xray_lib::ocr::load_engine(&d, set).ok()));
         let ocr = evaluate_ocr(&snap, &f, engine.as_ref().map(|e| e as &dyn OcrEngine)).unwrap_or_else(|e| panic!("{name}: {e}"));
         if let Some(r) = ocr {
             match &r.current {

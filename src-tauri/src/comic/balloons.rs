@@ -66,10 +66,13 @@ pub(crate) fn text_blocks(lines: &[OcrLine]) -> Vec<Vec<usize>> {
     let mut parent: Vec<usize> = (0..n).collect();
     for i in 0..n {
         for j in i + 1..n {
-            let (a, b) = (&lines[i].bounds, &lines[j].bounds);
-            if lines[i].rot != 0 || lines[j].rot != 0 {
+            // vertical columns (rot 90/270) are compared in their own frame:
+            // swap the axes so that columns side by side look like stacked lines
+            if (lines[i].rot == 0) != (lines[j].rot == 0) {
                 continue;
             }
+            let frame = |b: &Bounds| if lines[i].rot == 0 { *b } else { Bounds { x: b.y, y: b.x, w: b.h, h: b.w } };
+            let (a, b) = (&frame(&lines[i].bounds), &frame(&lines[j].bounds));
             let hmin = a.h.min(b.h);
             let hmax = a.h.max(b.h);
             if hmax > hmin * 1.7 {
@@ -109,9 +112,10 @@ pub(crate) fn text_blocks(lines: &[OcrLine]) -> Vec<Vec<usize>> {
     out
 }
 
-/// Line box shrunk so that it does not reach across a tight balloon outline.
+/// Line box shrunk so that it does not reach across a tight balloon outline
+/// (by a share of its thickness: the height of a line, the width of a column).
 fn inner_box(b: &Bounds, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
-    let m = (b.h * 0.18).max(1.0);
+    let m = (b.h.min(b.w) * 0.18).max(1.0);
     let x0 = (b.x + m).max(0.0) as u32;
     let y0 = (b.y + m).max(0.0) as u32;
     let x1 = ((b.x1() - m).max(b.x + m + 1.0) as u32).min(img_w);
@@ -280,7 +284,7 @@ pub fn detect_balloons(img: &RgbImage, lines: &[OcrLine], panels: &[Bounds]) -> 
             None => (text_area * MAX_FILL_PER_TEXT).min(page_area * MAX_FILL_PAGE),
         }
         .max(64.0) as usize;
-        let pad = block.iter().map(|&i| lines[i].bounds.h).fold(0.0f32, f32::max);
+        let pad = block.iter().map(|&i| lines[i].bounds.h.min(lines[i].bounds.w)).fold(0.0f32, f32::max);
         // one fill per line: a block of stacked lines may span a narration
         // box and the balloons right below it. The fill may cross the
         // boxes of the block's lines on the same background (tight leading

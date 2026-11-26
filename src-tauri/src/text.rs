@@ -92,6 +92,41 @@ pub enum Hyphen {
     Hard,
 }
 
+/// Chinese / Japanese characters and punctuation (kana, kanji, CJK symbols,
+/// full-width forms): text written without spaces between words.
+pub fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x2E80..=0x2FDF      // radicals
+        | 0x3000..=0x30FF    // CJK punctuation, hiragana, katakana
+        | 0x31F0..=0x31FF    // katakana extensions
+        | 0x3400..=0x4DBF    // kanji extension A
+        | 0x4E00..=0x9FFF    // kanji
+        | 0xF900..=0xFAFF    // compatibility kanji
+        | 0xFF00..=0xFFEF    // full-width forms, half-width katakana
+    )
+}
+
+/// Whether two pieces of text joined on one line need a space between
+/// them: not when either side of the join is CJK.
+pub fn needs_space(a: &str, b: &str) -> bool {
+    match (a.trim_end().chars().last(), b.trim_start().chars().next()) {
+        (Some(x), Some(y)) => !(is_cjk(x) || is_cjk(y)),
+        _ => false,
+    }
+}
+
+/// Join pieces of text with a space, except next to CJK characters.
+pub fn join_words<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for p in parts {
+        if !out.is_empty() && needs_space(&out, p) {
+            out.push(' ');
+        }
+        out.push_str(p);
+    }
+    out
+}
+
 pub fn trailing_hyphen(s: &str) -> Hyphen {
     let t = s.trim_end();
     let mut it = t.chars().rev();
@@ -147,6 +182,7 @@ pub fn join_lines_with(a: &str, b: &str, keep_hard_hyphens: bool) -> (String, bo
                 (format!("{}{}", a_t, b_t), true)
             }
         }
+        Hyphen::None if !needs_space(a_t, b_t) => (format!("{}{}", a_t, b_t), false),
         Hyphen::None => (format!("{} {}", a_t, b_t), false),
     }
 }
@@ -344,5 +380,13 @@ mod tests {
     #[test]
     fn ligatures() {
         assert_eq!(normalize_fragment("e\u{FB03}cient\n"), "efficient");
+    }
+
+    #[test]
+    fn cjk_lines_join_without_spaces() {
+        assert_eq!(join_lines("しかし今度のキラは", "Lの使ったような").0, "しかし今度のキラはLの使ったような");
+        assert_eq!(join_lines("……", "考えているんです").0, "……考えているんです");
+        assert_eq!(join_lines("dark street,", "but").0, "dark street, but");
+        assert_eq!(join_words(["それに", "ほとんど", "OK", "fine"]), "それにほとんどOK fine");
     }
 }

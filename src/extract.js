@@ -25,6 +25,8 @@ const DRAW = { moveTo: 0, lineTo: 1, curveTo: 2, quadraticCurveTo: 3, closePath:
 
 /** Extract one page. Returns { page, viewport, data, tagged }. */
 export async function extractPage(pdfjsLib, pdfDoc, pageNum) {
+  // documents of page images (imagedoc.js): no text, one image per page
+  if (pdfDoc.isImageDocument) return pdfDoc.extractPage(pageNum);
   const page = await pdfDoc.getPage(pageNum);
   const viewport = page.getViewport({ scale: 1 });
 

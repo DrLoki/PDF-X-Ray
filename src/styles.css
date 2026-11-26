@@ -637,6 +637,16 @@ body, html {
   box-shadow: 0 0 20px rgba(0, 240, 255, 0.2);
 }
 
+/* "Raggi X" off: the page as it is */
+.no-xray #pdf-canvas,
+.no-xray .tr-balloon { filter: none; }
+
+.compact-select {
+  width: auto;
+  padding: 4px 26px 4px 8px;
+  font-size: 12px;
+}
+
 #overlay-canvas {
   position: absolute;
   top: 0;

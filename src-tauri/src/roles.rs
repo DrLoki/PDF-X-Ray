@@ -38,7 +38,7 @@ pub fn struct_role_to_role(r: &str) -> Option<&'static str> {
 }
 
 fn leaf_text(lines: &[Line], leaf: &Leaf) -> String {
-    leaf.lines.iter().map(|&i| lines[i].text.as_str()).collect::<Vec<_>>().join(" ")
+    crate::text::join_words(leaf.lines.iter().map(|&i| lines[i].text.as_str()))
 }
 
 pub fn classify_leaf(lines: &[Line], leaf: &Leaf, page: &Bounds, images: &[Bounds], body_fs: f32, use_tags: bool) -> &'static str {

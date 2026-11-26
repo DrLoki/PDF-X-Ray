@@ -14,14 +14,25 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const MODEL_SET: &str = "paddleocr-v5-latin";
-
 pub struct ModelFile {
     pub name: &'static str,
     pub sha256: &'static str,
     pub size: u64,
     pub urls: &'static [&'static str],
     pub role: &'static str,
+}
+
+/// A model set: detection, recognition and its character dictionary, in
+/// this order. Each set has its own folder (the detection model is the same
+/// file in both sets).
+pub struct ModelSet {
+    /// Engine id, also the folder name and the `engine` of OCR snapshots.
+    pub id: &'static str,
+    /// Language code used by the UI and the IPC (`latin`, `ja`).
+    pub lang: &'static str,
+    /// Shown in the download confirmation.
+    pub label: &'static str,
+    pub files: [ModelFile; 3],
 }
 
 /// `RELEASE` + file name, as a `&'static str`.
@@ -33,38 +44,89 @@ macro_rules! const_format_url {
 #[cfg(test)]
 const RELEASE: &str = "https://github.com/DrLoki/PDF-X-Ray/releases/download/models-v1/";
 
-pub const FILES: [ModelFile; 3] = [
-    ModelFile {
-        name: "PP-OCRv5_mobile_det.onnx",
-        sha256: "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d",
-        size: 4_826_518,
-        urls: &[
-            const_format_url!("PP-OCRv5_mobile_det.onnx"),
-            "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/main/inference.onnx",
-        ],
-        role: "rilevamento del testo",
-    },
-    ModelFile {
-        name: "latin_PP-OCRv5_mobile_rec.onnx",
-        sha256: "7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498",
-        size: 8_042_023,
-        urls: &[
-            const_format_url!("latin_PP-OCRv5_mobile_rec.onnx"),
-            "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx",
-        ],
-        role: "riconoscimento (alfabeto latino)",
-    },
-    ModelFile {
-        name: "latin_PP-OCRv5_mobile_rec.yml",
-        sha256: "0bbe984570f597af3638e50bdf2e8276f3ab26a61966096538b3b0d1849f5c84",
-        size: 6_817,
-        urls: &[
-            const_format_url!("latin_PP-OCRv5_mobile_rec.yml"),
-            "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml",
-        ],
-        role: "dizionario dei caratteri",
-    },
-];
+const DET: ModelFile = ModelFile {
+    name: "PP-OCRv5_mobile_det.onnx",
+    sha256: "a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d",
+    size: 4_826_518,
+    urls: &[
+        const_format_url!("PP-OCRv5_mobile_det.onnx"),
+        "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/main/inference.onnx",
+    ],
+    role: "rilevamento del testo",
+};
+
+/// Latin script (accented letters included).
+pub const LATIN: ModelSet = ModelSet {
+    id: "paddleocr-v5-latin",
+    lang: "latin",
+    label: "alfabeto latino",
+    files: [
+        DET,
+        ModelFile {
+            name: "latin_PP-OCRv5_mobile_rec.onnx",
+            sha256: "7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498",
+            size: 8_042_023,
+            urls: &[
+                const_format_url!("latin_PP-OCRv5_mobile_rec.onnx"),
+                "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx",
+            ],
+            role: "riconoscimento (alfabeto latino)",
+        },
+        ModelFile {
+            name: "latin_PP-OCRv5_mobile_rec.yml",
+            sha256: "0bbe984570f597af3638e50bdf2e8276f3ab26a61966096538b3b0d1849f5c84",
+            size: 6_817,
+            urls: &[
+                const_format_url!("latin_PP-OCRv5_mobile_rec.yml"),
+                "https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml",
+            ],
+            role: "dizionario dei caratteri",
+        },
+    ],
+};
+
+/// Japanese (kana, kanji, vertical text), with Chinese and English: the
+/// PP-OCRv5 main recognition model, 18 383 characters.
+pub const JAPANESE: ModelSet = ModelSet {
+    id: "paddleocr-v5-cjk",
+    lang: "ja",
+    label: "giapponese (anche cinese e inglese)",
+    files: [
+        DET,
+        ModelFile {
+            name: "PP-OCRv5_mobile_rec.onnx",
+            sha256: "da72dc72ca4dc220df0dfde68c1dedc31c58d3e76a25871122e5056227d50092",
+            size: 16_534_782,
+            urls: &[
+                const_format_url!("PP-OCRv5_mobile_rec.onnx"),
+                "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx",
+            ],
+            role: "riconoscimento (giapponese, cinese, inglese)",
+        },
+        ModelFile {
+            name: "PP-OCRv5_mobile_rec.yml",
+            sha256: "5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e",
+            size: 148_345,
+            urls: &[
+                const_format_url!("PP-OCRv5_mobile_rec.yml"),
+                "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml",
+            ],
+            role: "dizionario dei caratteri",
+        },
+    ],
+};
+
+pub const SETS: [&ModelSet; 2] = [&LATIN, &JAPANESE];
+
+/// The set for a UI language code (Latin for anything unknown).
+pub fn set_for_lang(lang: &str) -> &'static ModelSet {
+    SETS.iter().copied().find(|s| s.lang == lang).unwrap_or(&LATIN)
+}
+
+/// The set that produced an OCR result (`OcrPage::engine`).
+pub fn set_for_engine(id: &str) -> Option<&'static ModelSet> {
+    SETS.iter().copied().find(|s| s.id == id)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +141,7 @@ pub struct FileStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ModelsStatus {
     pub set: String,
+    pub label: String,
     pub dir: String,
     pub installed: bool,
     /// Bytes still to download.
@@ -88,19 +151,26 @@ pub struct ModelsStatus {
     pub sources: Vec<String>,
 }
 
-/// Model folder for a data directory: `<data>/models/<set>`.
-pub fn set_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("models").join(MODEL_SET)
+/// Model folder for a data directory: `<data>/models/<set id>`.
+pub fn set_dir(data_dir: &Path, set: &ModelSet) -> PathBuf {
+    data_dir.join("models").join(set.id)
 }
 
-/// Data directory of the app without Tauri (for the CLI and the tests):
-/// `$PDFXRAY_MODEL_DIR` points straight at a model folder; otherwise the
-/// same folder Tauri uses for the identifier `com.drloki.pdfxray`.
-pub fn default_model_dir() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("PDFXRAY_MODEL_DIR") {
-        if !d.trim().is_empty() {
-            return Some(PathBuf::from(d));
-        }
+/// `$PDFXRAY_MODEL_DIR` for a set: its `<set id>` subfolder when present,
+/// otherwise the folder itself (a folder holding one set's files).
+pub fn env_model_dir(set: &ModelSet) -> Option<PathBuf> {
+    let d = std::env::var("PDFXRAY_MODEL_DIR").ok().filter(|d| !d.trim().is_empty())?;
+    let base = PathBuf::from(d);
+    let sub = base.join(set.id);
+    Some(if sub.is_dir() { sub } else { base })
+}
+
+/// Model folder of a set without Tauri (for the CLI and the tests):
+/// `$PDFXRAY_MODEL_DIR` (see [`env_model_dir`]); otherwise the same folder
+/// Tauri uses for the identifier `com.drloki.pdfxray`.
+pub fn default_model_dir(set: &ModelSet) -> Option<PathBuf> {
+    if let Some(d) = env_model_dir(set) {
+        return Some(d);
     }
     let id = "com.drloki.pdfxray";
     let data = if cfg!(target_os = "windows") {
@@ -112,21 +182,22 @@ pub fn default_model_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
     }?;
-    Some(set_dir(&data.join(id)))
+    Some(set_dir(&data.join(id), set))
 }
 
 fn present(dir: &Path, f: &ModelFile) -> bool {
     fs::metadata(dir.join(f.name)).map(|m| m.len() == f.size).unwrap_or(false)
 }
 
-pub fn status(dir: &Path) -> ModelsStatus {
-    let files: Vec<FileStatus> = FILES
+pub fn status(dir: &Path, set: &ModelSet) -> ModelsStatus {
+    let files: Vec<FileStatus> = set
+        .files
         .iter()
         .map(|f| FileStatus { name: f.name.into(), role: f.role.into(), size: f.size, present: present(dir, f) })
         .collect();
     let missing_bytes = files.iter().filter(|f| !f.present).map(|f| f.size).sum();
     let mut sources: Vec<String> = Vec::new();
-    for f in &FILES {
+    for f in &set.files {
         for u in f.urls {
             let host = u.split('/').nth(2).unwrap_or(u).to_string();
             if !sources.contains(&host) {
@@ -135,7 +206,8 @@ pub fn status(dir: &Path) -> ModelsStatus {
         }
     }
     ModelsStatus {
-        set: MODEL_SET.into(),
+        set: set.id.into(),
+        label: set.label.into(),
         dir: dir.to_string_lossy().into_owned(),
         installed: files.iter().all(|f| f.present),
         missing_bytes,
@@ -144,14 +216,14 @@ pub fn status(dir: &Path) -> ModelsStatus {
     }
 }
 
-pub fn det_path(dir: &Path) -> PathBuf {
-    dir.join(FILES[0].name)
+pub fn det_path(dir: &Path, set: &ModelSet) -> PathBuf {
+    dir.join(set.files[0].name)
 }
-pub fn rec_path(dir: &Path) -> PathBuf {
-    dir.join(FILES[1].name)
+pub fn rec_path(dir: &Path, set: &ModelSet) -> PathBuf {
+    dir.join(set.files[1].name)
 }
-pub fn dict_path(dir: &Path) -> PathBuf {
-    dir.join(FILES[2].name)
+pub fn dict_path(dir: &Path, set: &ModelSet) -> PathBuf {
+    dir.join(set.files[2].name)
 }
 
 fn sha256_file(p: &Path) -> std::io::Result<String> {
@@ -169,8 +241,8 @@ fn sha256_file(p: &Path) -> std::io::Result<String> {
 }
 
 /// Check the installed files against their SHA-256 (slow-ish: reads them).
-pub fn verify(dir: &Path) -> Result<(), String> {
-    for f in &FILES {
+pub fn verify(dir: &Path, set: &ModelSet) -> Result<(), String> {
+    for f in &set.files {
         let p = dir.join(f.name);
         let got = sha256_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         if got != f.sha256 {
@@ -187,11 +259,11 @@ pub type Progress<'a> = dyn FnMut(&str, u64, u64) + 'a;
 /// Download the missing files. Each file goes to `<name>.part`, is checked
 /// against its SHA-256 and only then renamed; a failed mirror falls back to
 /// the next one.
-pub fn download(dir: &Path, progress: &mut Progress) -> Result<(), String> {
+pub fn download(dir: &Path, set: &ModelSet, progress: &mut Progress) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let total: u64 = FILES.iter().filter(|f| !present(dir, f)).map(|f| f.size).sum();
+    let total: u64 = set.files.iter().filter(|f| !present(dir, f)).map(|f| f.size).sum();
     let mut done = 0u64;
-    for f in FILES.iter().filter(|f| !present(dir, f)) {
+    for f in set.files.iter().filter(|f| !present(dir, f)) {
         let mut errors = Vec::new();
         let mut ok = false;
         for url in f.urls {
@@ -254,17 +326,32 @@ mod tests {
 
     #[test]
     fn mirrors_start_with_the_project_release() {
-        for f in &FILES {
-            assert!(f.urls[0].starts_with(RELEASE), "{}", f.urls[0]);
-            assert!(f.urls[0].ends_with(f.name));
+        for set in SETS {
+            for f in &set.files {
+                assert!(f.urls[0].starts_with(RELEASE), "{}", f.urls[0]);
+                assert!(f.urls[0].ends_with(f.name));
+            }
         }
     }
 
     #[test]
     fn status_of_an_empty_folder() {
-        let s = status(Path::new("this/folder/does/not/exist"));
-        assert!(!s.installed);
-        assert_eq!(s.missing_bytes, FILES.iter().map(|f| f.size).sum::<u64>());
-        assert_eq!(s.sources, vec!["github.com".to_string(), "huggingface.co".to_string()]);
+        for set in SETS {
+            let s = status(Path::new("this/folder/does/not/exist"), set);
+            assert!(!s.installed);
+            assert_eq!(s.set, set.id);
+            assert_eq!(s.missing_bytes, set.files.iter().map(|f| f.size).sum::<u64>());
+            assert_eq!(s.sources, vec!["github.com".to_string(), "huggingface.co".to_string()]);
+        }
+    }
+
+    #[test]
+    fn sets_by_language_and_engine() {
+        assert_eq!(set_for_lang("ja").id, "paddleocr-v5-cjk");
+        assert_eq!(set_for_lang("xx").id, "paddleocr-v5-latin");
+        assert_eq!(set_for_engine("paddleocr-v5-cjk").map(|s| s.lang), Some("ja"));
+        // file names are unique within a set, the detection model is shared
+        assert_eq!(LATIN.files[0].sha256, JAPANESE.files[0].sha256);
+        assert_ne!(LATIN.files[1].name, JAPANESE.files[1].name);
     }
 }

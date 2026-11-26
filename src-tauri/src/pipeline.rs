@@ -35,7 +35,7 @@ fn make_segment(page: &PageInput, layout: &PageLayout, pl: &PageLines, leaf_idx:
     let bounds = Bounds::union_all(row_bounds.iter()).unwrap_or_default();
     let text = rows
         .iter()
-        .map(|r| r.iter().map(|&i| lines[i].text.as_str()).collect::<Vec<_>>().join(" "))
+        .map(|r| crate::text::join_words(r.iter().map(|&i| lines[i].text.as_str())))
         .collect::<Vec<_>>()
         .join("\n");
     let fs = weighted_mode(line_idxs.iter().map(|&i| (lines[i].fs, lines[i].chars())), 10.0);

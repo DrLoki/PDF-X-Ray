@@ -63,13 +63,13 @@ pub trait OcrEngine: Send + Sync {
     fn recognize(&self, img: &RgbImage) -> Result<OcrPage, String>;
 }
 
-/// Load the default engine from a model folder (see [`models`]).
-pub fn load_engine(dir: &std::path::Path) -> Result<paddle::PaddleOcr, String> {
-    let st = models::status(dir);
+/// Load the engine of a model set from its folder (see [`models`]).
+pub fn load_engine(dir: &std::path::Path, set: &models::ModelSet) -> Result<paddle::PaddleOcr, String> {
+    let st = models::status(dir, set);
     if !st.installed {
-        return Err(format!("modelli OCR non installati in {}", st.dir));
+        return Err(format!("modelli OCR ({}) non installati in {}", set.label, st.dir));
     }
-    paddle::PaddleOcr::load(&models::det_path(dir), &models::rec_path(dir), &models::dict_path(dir))
+    paddle::PaddleOcr::load(set.id, &models::det_path(dir, set), &models::rec_path(dir, set), &models::dict_path(dir, set))
 }
 
 /// Lines whose recognition confidence is below this are dropped.
@@ -104,14 +104,17 @@ pub fn to_text_elements(page: &OcrPage, scale: f32) -> Vec<TextElement> {
     let thickness: Vec<f32> = page.lines.iter().map(|l| if l.rot == 0 { l.bounds.h } else { l.bounds.w }).collect();
     let weights: Vec<usize> = page.lines.iter().map(|l| l.text.chars().count()).collect();
     let norm = size_groups(&thickness, &weights);
+    // distance to the nearest neighbouring line: above / below for
+    // horizontal lines, left / right for vertical columns (Japanese)
     let pitch: Vec<f32> = page
         .lines
         .iter()
         .map(|a| {
             page.lines
                 .iter()
-                .filter(|b| a.rot == 0 && b.rot == 0 && !std::ptr::eq(*b, a) && a.bounds.h_overlap(&b.bounds) > 0.0)
-                .map(|b| (a.bounds.cy() - b.bounds.cy()).abs())
+                .filter(|b| !std::ptr::eq(*b, a) && (a.rot == 0) == (b.rot == 0))
+                .filter(|b| if a.rot == 0 { a.bounds.h_overlap(&b.bounds) > 0.0 } else { a.bounds.v_overlap(&b.bounds) > 0.0 })
+                .map(|b| if a.rot == 0 { (a.bounds.cy() - b.bounds.cy()).abs() } else { (a.bounds.cx() - b.bounds.cx()).abs() })
                 .filter(|d| *d > 0.0)
                 .fold(f32::INFINITY, f32::min)
         })

@@ -81,9 +81,11 @@
           <div class="toolbar-group">
             <button id="btn-open-file" class="btn primary-btn">
               <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
-              Apri PDF
+              Apri
             </button>
-            <input type="file" id="file-selector" accept="application/pdf" style="display: none;" />
+            <button id="btn-open-folder" class="btn secondary-btn" title="Apri una cartella di immagini di pagina (fumetto, manga, scansioni)">Cartella</button>
+            <input type="file" id="file-selector" multiple accept="application/pdf,.pdf,.cbz,.zip,application/vnd.comicbook+zip,image/*" style="display: none;" title="PDF, CBZ o immagini di pagina" />
+            <input type="file" id="folder-selector" webkitdirectory multiple style="display: none;" />
           </div>
 
           <div class="toolbar-divider"></div>
@@ -140,6 +142,11 @@
               <span class="checkmark"></span>
               Flow
             </label>
+            <label class="checkbox-container" title="Effetto radiografia sulla pagina (colori invertiti). Togli la spunta per vedere la pagina com'è">
+              <input type="checkbox" id="chk-xray" checked />
+              <span class="checkmark"></span>
+              Raggi X
+            </label>
           </div>
 
           <div class="toolbar-divider"></div>
@@ -151,6 +158,22 @@
               <span class="checkmark"></span>
               Traduzione
             </label>
+            <select id="select-tr-lang" class="styled-select compact-select" title="Lingua della traduzione automatica">
+              <option value="it" selected>Italiano</option>
+              <option value="en">English</option>
+              <option value="fr">Français</option>
+              <option value="de">Deutsch</option>
+              <option value="es">Español</option>
+              <option value="pt">Português</option>
+              <option value="pt-BR">Português (Brasil)</option>
+              <option value="nl">Nederlands</option>
+              <option value="pl">Polski</option>
+              <option value="ru">Русский</option>
+              <option value="ja">日本語</option>
+              <option value="zh-CN">中文 (简体)</option>
+              <option value="ko">한국어</option>
+            </select>
+            <button id="btn-translate" class="btn primary-btn compact" title="Traduci la pagina con Google Translate (modalità free di GianoReader: il testo dei paragrafi viene inviato a Google). Poi traduce anche le pagine che apri">Traduci</button>
             <button id="btn-pseudo" class="btn secondary-btn compact" title="Pseudo-traduzione (+30% di lunghezza) per collaudare re-flow e adattamento">Pseudo</button>
             <button id="btn-import-tr" class="btn secondary-btn compact" title="Importa traduzioni (JSON: {id: testo} oppure il file delle unità compilato)">Importa</button>
             <input type="file" id="tr-file-selector" accept="application/json,.json" style="display: none;" />

@@ -2,6 +2,7 @@ import * as pdfjsLib from './assets/pdfjs/pdf.min.mjs';
 import { extractPage } from './extract.js';
 import { serializeLayoutTree, serializeUnits, serializeParagraphsText, parseTranslations } from './export.js';
 import { pseudoTranslate, renderTranslationLayer } from './translate.js';
+import { ImageDocument, zipSource, filesSource, looksLikeZip, isImageName } from './imagedoc.js';
 import { rasterizePage, recognizeCanvas, formatBytes, ocrSummary, LOW_CONF, OCR_DPI } from './ocr.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdfjs/pdf.worker.min.mjs';
@@ -68,6 +69,10 @@ const state = {
   hoveredBlockId: null,
 
   translations: new Map(),   // paragraph id → translated text
+  translationSource: null,   // 'pseudo' | 'import' | 'google'
+  mtCache: new Map(),        // `${lang}\u0000${paragraph text}` → machine translation
+  autoTranslate: false,      // machine-translate every page shown (after "Traduci")
+  translating: false,
   pieces: new Map(),         // paragraph id → [text per segment]
 
   thresholdY: 10,
@@ -151,11 +156,11 @@ function syncAutoSliders() {
 
 function cacheElements() {
   const ids = {
-    btnOpen: 'btn-open-file', fileSelector: 'file-selector', btnPrev: 'btn-prev-page', btnNext: 'btn-next-page',
+    btnOpen: 'btn-open-file', fileSelector: 'file-selector', btnOpenFolder: 'btn-open-folder', folderSelector: 'folder-selector', btnPrev: 'btn-prev-page', btnNext: 'btn-next-page',
     inputPageNum: 'input-page-num', txtPageTotal: 'txt-page-total', btnZoomIn: 'btn-zoom-in', btnZoomOut: 'btn-zoom-out',
     txtZoomPercent: 'txt-zoom-percent', chkShowChars: 'chk-show-chars', chkShowBlocks: 'chk-show-blocks',
     chkShowProjections: 'chk-show-projections', chkShowFlow: 'chk-show-flow', chkShowTranslation: 'chk-show-translation',
-    btnPseudo: 'btn-pseudo', btnImportTr: 'btn-import-tr', trFileSelector: 'tr-file-selector', analysisStatus: 'analysis-status',
+    btnPseudo: 'btn-pseudo', btnImportTr: 'btn-import-tr', btnTranslate: 'btn-translate', selectTrLang: 'select-tr-lang', chkXray: 'chk-xray', trFileSelector: 'tr-file-selector', analysisStatus: 'analysis-status',
     chkAutoGutter: 'chk-auto-gutter', selectAutoStrategy: 'select-auto-strategy', chkUseTags: 'chk-use-tags', chkStitch: 'chk-stitch',
     pdfCanvas: 'pdf-canvas', overlayCanvas: 'overlay-canvas', translationLayer: 'translation-layer',
     canvasContainer: 'canvas-container', spinner: 'loading-spinner',
@@ -182,7 +187,9 @@ function cacheElements() {
 
 function registerEvents() {
   el.btnOpen.addEventListener('click', () => el.fileSelector.click());
-  el.fileSelector.addEventListener('change', (e) => e.target.files?.[0] && loadPDFFile(e.target.files[0]));
+  el.fileSelector.addEventListener('change', (e) => { const f = [...(e.target.files || [])]; e.target.value = ''; if (f.length) openFiles(f); });
+  el.btnOpenFolder.addEventListener('click', () => el.folderSelector.click());
+  el.folderSelector.addEventListener('change', (e) => { const f = [...(e.target.files || [])]; e.target.value = ''; if (f.length) openFiles(f, true); });
 
   el.btnPrev.addEventListener('click', () => gotoPage(state.pageNum - 1));
   el.btnNext.addEventListener('click', () => gotoPage(state.pageNum + 1));
@@ -234,6 +241,23 @@ function registerEvents() {
   });
 
   el.btnPseudo.addEventListener('click', applyPseudoTranslation);
+  el.btnTranslate.addEventListener('click', () => { state.autoTranslate = true; machineTranslatePage(state.pageNum, true); });
+  el.selectTrLang.addEventListener('change', () => {
+    try { localStorage.setItem('trLang', el.selectTrLang.value); } catch {}
+    if (state.translationSource === 'google') {
+      applyMachineTranslations();
+      recomputePieces().then(() => { renderParagraphList(); refreshTranslationLayer(); });
+      if (state.autoTranslate) machineTranslatePage(state.pageNum);
+    }
+  });
+  try { const l = localStorage.getItem('trLang'); if (l && [...el.selectTrLang.options].some(o => o.value === l)) el.selectTrLang.value = l; } catch {}
+  const applyXray = () => {
+    document.body.classList.toggle('no-xray', !el.chkXray.checked);
+    try { localStorage.setItem('xray', el.chkXray.checked ? '1' : '0'); } catch {}
+  };
+  try { if (localStorage.getItem('xray') === '0') el.chkXray.checked = false; } catch {}
+  el.chkXray.addEventListener('change', applyXray);
+  applyXray();
   el.btnImportTr.addEventListener('click', () => el.trFileSelector.click());
   el.trFileSelector.addEventListener('change', importTranslations);
 
@@ -390,30 +414,101 @@ function setupDragAndDrop() {
   const ws = document.getElementById('document-workspace');
   ws.addEventListener('dragover', (e) => { e.preventDefault(); ws.classList.add('drag-over'); });
   ws.addEventListener('dragleave', () => ws.classList.remove('drag-over'));
-  ws.addEventListener('drop', (e) => {
+  ws.addEventListener('drop', async (e) => {
     e.preventDefault();
     ws.classList.remove('drag-over');
-    const file = e.dataTransfer.files?.[0];
-    if (file && (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))) loadPDFFile(file);
+    // a dropped folder: its files, read through the entries API
+    const entries = [...(e.dataTransfer.items || [])].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+    if (entries.length === 1 && entries[0].isDirectory) {
+      const files = await readDroppedFolder(entries[0]);
+      if (files.length) openFiles(files, true);
+      return;
+    }
+    const files = [...(e.dataTransfer.files || [])];
+    if (files.length) openFiles(files);
   });
 }
 
-async function loadPDFFile(file) {
+/** Files of a dropped folder (recursive), with `webkitRelativePath`-like paths. */
+async function readDroppedFolder(dir) {
+  const out = [];
+  const walk = async (entry, path) => {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      // File.webkitRelativePath is read-only: keep the path alongside
+      out.push(Object.defineProperty(file, 'webkitRelativePath', { value: path + file.name }));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, path + entry.name + '/');
+      }
+    }
+  };
+  const reader = dir.createReader();
+  for (;;) {
+    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    if (!batch.length) break;
+    for (const child of batch) await walk(child, dir.name + '/');
+  }
+  return out;
+}
+
+/**
+ * Open what the user picked or dropped: a PDF (pdf.js), a CBZ / zip, a
+ * folder or one or more image files (page images, `imagedoc.js`).
+ */
+async function openFiles(files, isFolder = false) {
+  if (!isFolder && files.length === 1) {
+    const f = files[0];
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) return loadDocument(f.name, () => openPdf(f));
+    if (/\.(cbz|zip)$/i.test(f.name) || await looksLikeZip(f)) return loadDocument(f.name, async (progress) => openImages(await zipSource(f), progress));
+  }
+  const images = files.filter(f => isImageName(f.webkitRelativePath || f.name));
+  if (!images.length) {
+    alert('Formato non supportato: apri un PDF, un CBZ, una cartella di immagini o delle immagini di pagina.');
+    return;
+  }
+  const src = await filesSource(files);
+  return loadDocument(src.name, (progress) => openImages(src, progress));
+}
+
+/** pdf.js document; `release` frees it when another document is opened. */
+async function openPdf(file) {
+  const data = await file.arrayBuffer();
+  // pdf.js 6: only the loading task can be destroyed (PDFDocumentProxy.destroy was removed)
+  const task = pdfjsLib.getDocument({ data, ...PDFJS_RESOURCES });
+  const doc = await task.promise;
+  return { doc, release: () => task.destroy() };
+}
+
+/** Document of page images (no conversion: pages are decoded when used). */
+async function openImages(source, progress) {
+  const doc = await ImageDocument.open(source, progress);
+  return { doc, release: () => doc.destroy() };
+}
+
+/**
+ * Open a document and analyse it. `open(progress)` returns { doc, release }:
+ * the new document is opened first, then the old one released, so a failed
+ * open keeps the current file.
+ */
+async function loadDocument(name, open) {
   const token = ++state.loadToken;
   showLoading(true);
   progressBegin();
   try {
-    const data = await file.arrayBuffer();
-    // pdf.js 6: only the loading task can be destroyed (PDFDocumentProxy.destroy was removed).
-    // Open the new document first, then release the old one, so a failed open keeps the current file.
-    const task = pdfjsLib.getDocument({ data, ...PDFJS_RESOURCES });
-    const doc = await task.promise;
-    if (token !== state.loadToken) { task.destroy(); return; }
-    const oldTask = state.loadingTask;
-    state.loadingTask = task;
+    const opened = await open((done, total) => {
+      paintProgress('Apertura', `pagina ${done}/${total}`, PHASE_WEIGHT.prepare * (done / total), '', false);
+    });
+    const doc = opened.doc;
+    if (token !== state.loadToken) { opened.release(); return; }
+    const old = state.loadingTask;
+    state.loadingTask = { destroy: opened.release };
     state.pdfDoc = doc;
-    if (oldTask) oldTask.destroy().catch(err => console.warn('Error releasing previous PDF:', err));
-    state.fileName = file.name;
+    if (old) Promise.resolve(old.destroy()).catch(err => console.warn('Error releasing previous document:', err));
+    state.fileName = name;
     state.totalPageCount = state.pdfDoc.numPages;
     state.pageNum = 1;
     state.pageData.clear();
@@ -428,8 +523,16 @@ async function loadPDFFile(file) {
     state.doc = null;
     state.extractionDone = false;
     state.translations.clear();
+    state.translationSource = null;
+    state.autoTranslate = false;
     state.pieces.clear();
     state.selectedBlockId = state.selectedParaId = state.hoveredBlockId = null;
+
+    if (doc.isImageDocument) {
+      // manga declared right-to-left in ComicInfo.xml
+      if (doc.info?.rtl) el.selectComicDir.value = 'rtl';
+      if (doc.failed.size) setStatus(`${doc.failed.size} immagini non leggibili (${[...doc.failed.keys()].slice(0, 3).map(i => doc.source.pages[i].name).join(', ')}${doc.failed.size > 3 ? '…' : ''})`, 'warn');
+    }
 
     el.txtPageTotal.textContent = state.totalPageCount;
     el.inputPageNum.value = 1;
@@ -807,8 +910,12 @@ async function runAnalysis(fullRun = false) {
     const lost = s.inputChars - s.outputChars;
     setStatus(`${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture · ${Math.round(performance.now() - t0)} ms` + (lost ? ` · ⚠ ${lost} caratteri persi` : '') + ocrStatusSuffix(), lost ? 'warn' : 'ok');
     if (!quiet) progressDone(pages.length, t0, `${s.pageCount} pagine · ${s.paragraphCount} paragrafi · ${s.stitchedJoins} cuciture`);
+    // machine translations follow the paragraph text: the ids change when the
+    // background OCR re-analyses the document
+    if (state.translationSource === 'google') applyMachineTranslations();
     await recomputePieces();
     refreshPageUI();
+    if (state.autoTranslate) machineTranslatePage(state.pageNum);
   } catch (err) {
     console.error('Analysis failed:', err);
     setStatus('Analisi fallita: ' + err, 'warn');
@@ -871,6 +978,8 @@ async function renderPage(num) {
 
     refreshPageUI();
     loadTaggedPDFStructure();
+    // after "Traduci", every page shown is translated too
+    if (state.autoTranslate) machineTranslatePage(num);
   } catch (err) {
     console.error('Error rendering page:', err);
   } finally {
@@ -1621,9 +1730,74 @@ function refreshTranslationLayer() {
   }
 }
 
+const mtKey = (lang, text) => `${lang}\u0000${text}`;
+
+/** Paragraph id → machine translation, from the cache, for the current analysis. */
+function applyMachineTranslations() {
+  const lang = el.selectTrLang.value;
+  state.translations = new Map();
+  for (const p of state.doc?.paragraphs || []) {
+    const t = state.mtCache.get(mtKey(lang, p.text));
+    if (t !== undefined) state.translations.set(p.id, t);
+  }
+}
+
+/**
+ * Machine-translate the paragraphs of a page that are not translated yet
+ * (Google Translate free endpoint, as GianoReader's free mode; the request
+ * runs in Rust). One request batch at a time: a page asked for while
+ * another is being translated is picked up afterwards.
+ */
+async function machineTranslatePage(pageNum, explicit = false) {
+  if (!state.doc || !isTauri()) return;
+  if (state.translationSource !== 'google') {
+    state.translationSource = 'google';
+    applyMachineTranslations();
+  }
+  if (!el.chkShowTranslation.checked) el.chkShowTranslation.checked = true;
+  if (state.translating) { state.pendingTranslatePage = pageNum; return; }
+  const lang = el.selectTrLang.value;
+  const paras = state.doc.paragraphs.filter(p => p.translatable && p.segments.some(s => s.pageNum === pageNum) && !state.mtCache.has(mtKey(lang, p.text)));
+  if (!paras.length) {
+    await recomputePieces();
+    renderParagraphList();
+    refreshTranslationLayer();
+    return;
+  }
+  state.translating = true;
+  el.btnTranslate.disabled = true;
+  setStatus(`Traduzione di ${paras.length} paragrafi…`);
+  let unlisten = null;
+  try {
+    unlisten = await window.__TAURI__.event.listen('translate-progress', (e) => {
+      setStatus(`Traduzione ${e.payload.done}/${e.payload.total} paragrafi…`);
+    });
+    const out = await window.__TAURI__.core.invoke('translate_free', { texts: paras.map(p => p.text), source: 'auto', target: lang });
+    paras.forEach((p, i) => state.mtCache.set(mtKey(lang, p.text), out[i] || ''));
+    applyMachineTranslations();
+    await recomputePieces();
+    renderParagraphList();
+    refreshTranslationLayer();
+  } catch (err) {
+    console.error('Translation failed:', err);
+    setStatus('Traduzione fallita: ' + err, 'warn');
+    if (explicit) alert('Traduzione fallita:\n' + err);
+    state.autoTranslate = false;
+  } finally {
+    if (unlisten) unlisten();
+    state.translating = false;
+    el.btnTranslate.disabled = false;
+  }
+  const next = state.pendingTranslatePage;
+  state.pendingTranslatePage = null;
+  if (next && state.autoTranslate) machineTranslatePage(next);
+}
+
 async function applyPseudoTranslation() {
   if (!state.doc) return;
   state.translations = new Map(state.doc.paragraphs.filter(p => p.translatable).map(p => [p.id, pseudoTranslate(p.text)]));
+  state.translationSource = 'pseudo';
+  state.autoTranslate = false;
   await recomputePieces();
   el.chkShowTranslation.checked = true;
   renderParagraphList();
@@ -1639,6 +1813,8 @@ async function importTranslations(e) {
     if (map.size === 0) throw new Error('nessuna traduzione trovata nel file');
     const known = state.doc ? [...map.keys()].filter(k => state.paraById.has(k)).length : 0;
     state.translations = map;
+    state.translationSource = 'import';
+    state.autoTranslate = false;
     await recomputePieces();
     el.chkShowTranslation.checked = true;
     renderParagraphList();

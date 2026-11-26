@@ -9,6 +9,7 @@ pub mod pipeline;
 pub mod reflow;
 pub mod roles;
 pub mod text;
+pub mod translate;
 pub mod xycut;
 
 use crate::model::{AnalysisOptions, DocumentResult, PageInput, TextElement};
@@ -80,21 +81,21 @@ fn save_snapshot(app: tauri::AppHandle, file_stem: String, json: String, png_bas
 // OCR
 // ---------------------------------------------------------------------------
 
-/// The OCR engine, loaded on first use and kept for the session.
+/// The OCR engines, one per model set (by set id), loaded on first use and
+/// kept for the session.
 #[derive(Default)]
 struct OcrState {
-    engine: Mutex<Option<Arc<PaddleOcr>>>,
+    engines: Mutex<std::collections::HashMap<&'static str, Arc<PaddleOcr>>>,
 }
 
-/// `$PDFXRAY_MODEL_DIR`, or `<app data>/models/<set>`.
-fn model_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(dir) = std::env::var("PDFXRAY_MODEL_DIR") {
-        if !dir.trim().is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+/// `$PDFXRAY_MODEL_DIR` (see `models::env_model_dir`), or
+/// `<app data>/models/<set id>`.
+fn model_dir(app: &tauri::AppHandle, set: &ocr::models::ModelSet) -> Result<PathBuf, String> {
+    if let Some(dir) = ocr::models::env_model_dir(set) {
+        return Ok(dir);
     }
     let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(ocr::models::set_dir(&data))
+    Ok(ocr::models::set_dir(&data, set))
 }
 
 /// Which pages need OCR (see `ocr::classify`).
@@ -103,10 +104,12 @@ fn classify_pages(pages: Vec<PageInput>) -> Vec<PageKind> {
     pages.iter().map(classify_page).collect()
 }
 
-/// Whether the OCR models are installed, and what a download would fetch.
+/// Whether the OCR models of a language (`latin`, `ja`) are installed, and
+/// what a download would fetch.
 #[tauri::command]
-fn ocr_models_status(app: tauri::AppHandle) -> Result<ModelsStatus, String> {
-    Ok(ocr::models::status(&model_dir(&app)?))
+fn ocr_models_status(app: tauri::AppHandle, lang: Option<String>) -> Result<ModelsStatus, String> {
+    let set = ocr::models::set_for_lang(lang.as_deref().unwrap_or("latin"));
+    Ok(ocr::models::status(&model_dir(&app, set)?, set))
 }
 
 #[derive(Clone, Serialize)]
@@ -120,19 +123,20 @@ struct DownloadProgress {
 /// Download the missing model files (the UI asks the user first). Emits
 /// `ocr-download-progress` events.
 #[tauri::command]
-async fn ocr_download_models(app: tauri::AppHandle) -> Result<ModelsStatus, String> {
-    let dir = model_dir(&app)?;
+async fn ocr_download_models(app: tauri::AppHandle, lang: Option<String>) -> Result<ModelsStatus, String> {
+    let set = ocr::models::set_for_lang(lang.as_deref().unwrap_or("latin"));
+    let dir = model_dir(&app, set)?;
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        ocr::models::download(&dir, &mut |file, total, done| {
+        ocr::models::download(&dir, set, &mut |file, total, done| {
             // at most ~10 events per second, plus the end of each file
             if last.elapsed().as_millis() >= 100 || done == total {
                 last = std::time::Instant::now();
                 let _ = handle.emit("ocr-download-progress", DownloadProgress { file: file.into(), total, done });
             }
         })?;
-        Ok(ocr::models::status(&dir))
+        Ok(ocr::models::status(&dir, set))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -161,13 +165,37 @@ fn header<T: std::str::FromStr>(req: &tauri::ipc::Request<'_>, name: &str) -> Re
         .ok_or_else(|| format!("header {name} mancante o non valido"))
 }
 
+#[derive(Clone, Serialize)]
+struct TranslateProgress {
+    done: usize,
+    total: usize,
+}
+
+/// Translate paragraphs with the free Google Translate endpoint (the "free"
+/// mode of GianoReader). `source` defaults to `auto`. Emits
+/// `translate-progress` events (paragraphs done / total).
+#[tauri::command]
+async fn translate_free(app: tauri::AppHandle, texts: Vec<String>, source: Option<String>, target: String) -> Result<Vec<String>, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        translate::translate_free(&texts, source.as_deref().unwrap_or("auto"), &target, &mut |done, total| {
+            let _ = handle.emit("translate-progress", TranslateProgress { done, total });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Recognise one rasterised page. Body: raw RGBA pixels; headers `x-width`,
-/// `x-height` (pixels) and `x-scale` (pixels per PDF point).
+/// `x-height` (pixels), `x-scale` (pixels per PDF point) and `x-lang`
+/// (`latin` by default, `ja`).
 #[tauri::command]
 async fn ocr_page(app: tauri::AppHandle, state: tauri::State<'_, OcrState>, request: tauri::ipc::Request<'_>) -> Result<OcrPageResult, String> {
     let w: u32 = header(&request, "x-width")?;
     let h: u32 = header(&request, "x-height")?;
     let scale: f32 = header(&request, "x-scale")?;
+    let lang: String = header(&request, "x-lang").unwrap_or_else(|_| "latin".into());
+    let set = ocr::models::set_for_lang(&lang);
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("corpo della richiesta: attesi i pixel RGBA".into());
     };
@@ -176,12 +204,12 @@ async fn ocr_page(app: tauri::AppHandle, state: tauri::State<'_, OcrState>, requ
     }
     let rgba = bytes.clone();
     let engine = {
-        let mut slot = state.engine.lock().map_err(|e| e.to_string())?;
-        match slot.as_ref() {
+        let mut engines = state.engines.lock().map_err(|e| e.to_string())?;
+        match engines.get(set.id) {
             Some(e) => e.clone(),
             None => {
-                let e = Arc::new(ocr::load_engine(&model_dir(&app)?)?);
-                *slot = Some(e.clone());
+                let e = Arc::new(ocr::load_engine(&model_dir(&app, set)?, set)?);
+                engines.insert(set.id, e.clone());
                 e
             }
         }
@@ -218,7 +246,8 @@ pub fn run() {
             classify_pages,
             ocr_models_status,
             ocr_download_models,
-            ocr_page
+            ocr_page,
+            translate_free
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

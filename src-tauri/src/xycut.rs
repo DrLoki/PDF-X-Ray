@@ -478,7 +478,7 @@ impl<'a> Ctx<'a> {
         let bounds = self.bbox(&idxs);
         let text = rows
             .iter()
-            .map(|r| r.iter().map(|&i| self.lines[i].text.as_str()).collect::<Vec<_>>().join(" "))
+            .map(|r| crate::text::join_words(r.iter().map(|&i| self.lines[i].text.as_str())))
             .collect::<Vec<_>>()
             .join("\n");
         let formatting = leaf_formatting(self.lines, &rows, &bounds);

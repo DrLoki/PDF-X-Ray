@@ -14,6 +14,13 @@
 //!   rotated by ±90° and the most confident reading wins (vertical credits).
 //!
 //! The parameters follow the `inference.yml` shipped with the models.
+//!
+//! Japanese (the `paddleocr-v5-cjk` set): vertical columns are read with the
+//! same rotation (PaddleOCR turns tall crops counter-clockwise); the
+//! furigana (ruby: small kana beside a column, above a horizontal line) is
+//! removed — blanked inside the crop of the main text ([`strip_ruby`]), and
+//! dropped when it was detected as a thin line of its own
+//! ([`drop_ruby_lines`]).
 
 use super::{OcrEngine, OcrLine, OcrPage, OcrWord, MIN_LINE_CONF};
 use crate::model::Bounds;
@@ -24,7 +31,6 @@ use rten_tensor::{NdTensor, Tensor};
 use std::path::Path;
 use std::time::Instant;
 
-pub const ENGINE_ID: &str = "paddleocr-v5-latin";
 
 const DB_THRESH: f32 = 0.3;
 const DB_BOX_THRESH: f32 = 0.6;
@@ -50,6 +56,10 @@ impl Default for PaddleParams {
 }
 
 pub struct PaddleOcr {
+    /// Model set id (`paddleocr-v5-latin`, `paddleocr-v5-cjk`).
+    id: String,
+    /// Japanese / Chinese set: furigana handling.
+    cjk: bool,
     det: Model,
     rec: Model,
     dict: Vec<String>,
@@ -122,7 +132,7 @@ fn unquote(v: &str) -> String {
 }
 
 impl PaddleOcr {
-    pub fn load(det: &Path, rec: &Path, dict_yml: &Path) -> Result<PaddleOcr, String> {
+    pub fn load(id: &str, det: &Path, rec: &Path, dict_yml: &Path) -> Result<PaddleOcr, String> {
         let det = Model::load_file(det).map_err(|e| format!("{}: {e}", det.display()))?;
         let rec = Model::load_file(rec).map_err(|e| format!("{}: {e}", rec.display()))?;
         let yml = std::fs::read_to_string(dict_yml).map_err(|e| format!("{}: {e}", dict_yml.display()))?;
@@ -130,7 +140,7 @@ impl PaddleOcr {
         if dict.len() < 50 {
             return Err(format!("{}: character dictionary not found", dict_yml.display()));
         }
-        Ok(PaddleOcr { det, rec, dict, params: PaddleParams::default() })
+        Ok(PaddleOcr { id: id.to_string(), cjk: id.contains("cjk"), det, rec, dict, params: PaddleParams::default() })
     }
 
     /// Detected text boxes in image pixels, with their mean probability.
@@ -302,6 +312,111 @@ fn crop(img: &RgbImage, b: &Bounds) -> RgbImage {
     imageops::crop_imm(img, x, y, w, h).to_image()
 }
 
+/// Blank the furigana inside the crop of a line of Japanese text.
+///
+/// The ink profile across the line (columns of a vertical crop, rows of a
+/// horizontal one) shows the main text as the band with the most ink; the
+/// ruby is a separate, much thinner band beside it (right of a column, above
+/// a line), parted by at least one empty step. Such bands are painted with
+/// the crop's background. Dark text on a light background is assumed.
+pub fn strip_ruby(c: &mut RgbImage, vertical: bool) {
+    let (w, h) = c.dimensions();
+    let (n, m) = if vertical { (w, h) } else { (h, w) };
+    if n < 6 {
+        return;
+    }
+    let lum = |p: &image::Rgb<u8>| (p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10;
+    let dark = |a: u32, b: u32| {
+        let p = if vertical { c.get_pixel(a, b) } else { c.get_pixel(b, a) };
+        lum(p) < 128
+    };
+    let profile: Vec<u32> = (0..n).map(|a| (0..m).filter(|&b| dark(a, b)).count() as u32).collect();
+    let min_ink = ((m as f32) * 0.02).max(1.0) as u32;
+    // bands of inked steps
+    let mut bands: Vec<(u32, u32, u32)> = Vec::new(); // (start, end, ink)
+    let mut a = 0;
+    while a < n {
+        if profile[a as usize] >= min_ink {
+            let s = a;
+            let mut ink = 0;
+            while a < n && profile[a as usize] >= min_ink {
+                ink += profile[a as usize];
+                a += 1;
+            }
+            bands.push((s, a, ink));
+        } else {
+            a += 1;
+        }
+    }
+    if bands.len() < 2 {
+        return;
+    }
+    // bands one step apart belong together (strokes of the same glyphs)
+    let mut merged: Vec<(u32, u32, u32)> = Vec::new();
+    for b in bands {
+        match merged.last_mut() {
+            Some(l) if b.0 <= l.1 + 1 => {
+                l.1 = b.1;
+                l.2 += b.2;
+            }
+            _ => merged.push(b),
+        }
+    }
+    let Some(&main) = merged.iter().max_by_key(|b| b.2) else { return };
+    let main_w = main.1 - main.0;
+    // background: the most common light value of the crop is close to white
+    // in balloons; use the lightest pixel to repaint
+    let bg = c.pixels().max_by_key(|p| lum(p)).copied().unwrap_or(image::Rgb([255, 255, 255]));
+    for b in merged {
+        if b == main {
+            continue;
+        }
+        // furigana: right of a column / above a line, thin
+        let beside = if vertical { b.0 >= main.1 } else { b.1 <= main.0 };
+        if !beside || (b.1 - b.0) as f32 > main_w as f32 * 0.6 {
+            continue;
+        }
+        for s in b.0..b.1 {
+            for t in 0..m {
+                if vertical {
+                    c.put_pixel(s, t, bg);
+                } else {
+                    c.put_pixel(t, s, bg);
+                }
+            }
+        }
+    }
+}
+
+/// Drop furigana detected as lines of their own: a thin vertical line just
+/// right of a column at least 1.6× thicker that spans it, or a thin
+/// horizontal line just above a thicker line.
+pub fn drop_ruby_lines(lines: Vec<OcrLine>) -> Vec<OcrLine> {
+    let thick = |l: &OcrLine| if l.rot == 90 || l.rot == 270 { l.bounds.w } else { l.bounds.h };
+    let keep: Vec<bool> = lines
+        .iter()
+        .map(|a| {
+            !lines.iter().any(|b| {
+                if std::ptr::eq(a, b) || (a.rot != 0) != (b.rot != 0) || thick(b) < thick(a) * 1.6 {
+                    return false;
+                }
+                let (ta, tb) = (thick(a), thick(b));
+                let (ab, bb) = (&a.bounds, &b.bounds);
+                if a.rot != 0 {
+                    // ruby right of the column, within its height
+                    let gap = ab.x - bb.x1();
+                    gap > -ta * 0.5 && gap < tb * 0.4 && ab.y >= bb.y - tb && ab.y1() <= bb.y1() + tb
+                } else {
+                    // ruby above the line, within its width
+                    let gap = bb.y - ab.y1();
+                    gap > -ta * 0.5 && gap < tb * 0.4 && ab.x >= bb.x - tb && ab.x1() <= bb.x1() + tb
+                }
+            })
+        })
+        .collect();
+    lines.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect()
+}
+
 /// Word boxes of a horizontal line from the decoded character spans.
 fn words_of(d: &Decoded, line: &Bounds) -> Vec<OcrWord> {
     let mut out = Vec::new();
@@ -331,7 +446,7 @@ fn words_of(d: &Decoded, line: &Bounds) -> Vec<OcrWord> {
 
 impl OcrEngine for PaddleOcr {
     fn id(&self) -> String {
-        ENGINE_ID.into()
+        self.id.clone()
     }
 
     fn recognize(&self, img: &RgbImage) -> Result<OcrPage, String> {
@@ -344,7 +459,10 @@ impl OcrEngine for PaddleOcr {
         let mut crops: Vec<RgbImage> = Vec::with_capacity(boxes.len());
         let mut variants: Vec<Vec<(usize, u16)>> = Vec::with_capacity(boxes.len());
         for (b, _) in &boxes {
-            let c = crop(img, b);
+            let mut c = crop(img, b);
+            if self.cjk {
+                strip_ruby(&mut c, b.h > b.w * VERTICAL_RATIO);
+            }
             let mut v = vec![(crops.len(), 0u16)];
             if b.h > b.w * VERTICAL_RATIO {
                 // reading top→bottom (rot 90): turn the crop counter-clockwise
@@ -377,9 +495,12 @@ impl OcrEngine for PaddleOcr {
             let words = if rot == 0 { words_of(best, b) } else { Vec::new() };
             lines.push(OcrLine { bounds: *b, text, conf: best.conf, det_score: *score, rot, words });
         }
+        if self.cjk {
+            lines = drop_ruby_lines(lines);
+        }
         lines.sort_by(|a, b| a.bounds.y.total_cmp(&b.bounds.y).then(a.bounds.x.total_cmp(&b.bounds.x)));
         Ok(OcrPage {
-            engine: ENGINE_ID.into(),
+            engine: self.id.clone(),
             width: img.width(),
             height: img.height(),
             lines,
@@ -410,5 +531,62 @@ mod tests {
         assert_eq!(w[0].text, "ab");
         assert_eq!(w[1].bounds.x, 120.0);
         assert_eq!(d.text(), "ab c");
+    }
+
+    fn column_with_ruby() -> RgbImage {
+        // a 40 px wide column of "glyphs" (x 0..40) and a 12 px ruby strip
+        // (x 46..58), 200 px tall
+        let mut img = RgbImage::from_pixel(60, 200, image::Rgb([255, 255, 255]));
+        for y in (10..190).step_by(30) {
+            for yy in y..y + 20 {
+                for x in 4..36 {
+                    img.put_pixel(x, yy, image::Rgb([0, 0, 0]));
+                }
+            }
+        }
+        for y in (20..80).step_by(12) {
+            for yy in y..y + 8 {
+                for x in 47..57 {
+                    img.put_pixel(x, yy, image::Rgb([0, 0, 0]));
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn ruby_strip_is_blanked() {
+        let mut img = column_with_ruby();
+        strip_ruby(&mut img, true);
+        assert!((0..200).all(|y| (46..60).all(|x| img.get_pixel(x, y)[0] == 255)), "ruby left");
+        assert_eq!(img.get_pixel(10, 15)[0], 0, "main column erased");
+        // horizontal text: the same picture transposed, ruby above
+        let v = column_with_ruby();
+        let mut hz = RgbImage::new(200, 60);
+        for (x, y, p) in v.enumerate_pixels() {
+            hz.put_pixel(y, 59 - x, *p);
+        }
+        strip_ruby(&mut hz, false);
+        assert!((0..200).all(|x| (0..14).all(|y| hz.get_pixel(x, y)[0] == 255)), "ruby above left");
+    }
+
+    #[test]
+    fn ruby_lines_are_dropped() {
+        let l = |x: f32, y: f32, w: f32, h: f32, rot: u16, t: &str| OcrLine {
+            bounds: Bounds { x, y, w, h },
+            text: t.into(),
+            conf: 1.0,
+            det_score: 1.0,
+            rot,
+            words: vec![],
+        };
+        let lines = vec![
+            l(100.0, 100.0, 40.0, 300.0, 90, "column"),
+            l(142.0, 150.0, 14.0, 40.0, 90, "ruby"),
+            l(40.0, 100.0, 40.0, 300.0, 90, "next column"),
+            l(300.0, 100.0, 14.0, 60.0, 90, "small but alone"),
+        ];
+        let kept: Vec<String> = drop_ruby_lines(lines).into_iter().map(|l| l.text).collect();
+        assert_eq!(kept, vec!["column", "next column", "small but alone"]);
     }
 }

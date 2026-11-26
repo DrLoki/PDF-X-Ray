@@ -21,7 +21,7 @@
 //! thresholds with the snapshot's strategy/priority, and default automatic
 //! settings. See `pdf_xray_lib::eval`.
 //!
-//!   cli_analyze --ocr IMAGE [--models DIR] [--det-max-side N] [--ref FILE] [--dpi N [--text]] [--json]
+//!   cli_analyze --ocr IMAGE [--models DIR] [--det-max-side N] [--lang latin|ja] [--ref FILE] [--dpi N [--text]] [--json]
 //!
 //! runs the OCR engine on an image and prints the recognised lines (box in
 //! pixels, detection score / recognition confidence, text). `--ref` scores
@@ -77,6 +77,7 @@ fn main() {
     let mut det_max_side: Option<u32> = None;
     let mut ref_file: Option<String> = None;
     let mut dpi: Option<f32> = None;
+    let mut lang = String::from("latin");
     let mut comic = ComicArgs::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -96,6 +97,7 @@ fn main() {
             "--det-max-side" => det_max_side = it.next().and_then(|v| v.parse().ok()),
             "--ref" => ref_file = it.next(),
             "--dpi" => dpi = it.next().and_then(|v| v.parse().ok()),
+            "--lang" => lang = it.next().unwrap_or_default(),
             "--comic" => comic.on = true,
             "--rtl" => comic.rtl = true,
             "--debug-png" => comic.debug_png = it.next(),
@@ -128,7 +130,8 @@ fn main() {
         return;
     }
     if let Some(img) = ocr_image {
-        run_ocr(&img, models.as_deref(), det_max_side, ref_file.as_deref(), dpi, text_mode, json_out, &comic);
+        let set = pdf_xray_lib::ocr::models::set_for_lang(&lang);
+        run_ocr(&img, models.as_deref(), det_max_side, set, ref_file.as_deref(), dpi, text_mode, json_out, &comic);
         return;
     }
 
@@ -299,12 +302,12 @@ fn run_eval(paths: &[String], json_out: bool) {
     }
 }
 
-fn load_engine(models: Option<&str>, det_max_side: Option<u32>) -> pdf_xray_lib::ocr::paddle::PaddleOcr {
-    let dir = models.map(std::path::PathBuf::from).or_else(pdf_xray_lib::ocr::models::default_model_dir).unwrap_or_else(|| {
+fn load_engine(models: Option<&str>, det_max_side: Option<u32>, set: &pdf_xray_lib::ocr::models::ModelSet) -> pdf_xray_lib::ocr::paddle::PaddleOcr {
+    let dir = models.map(std::path::PathBuf::from).or_else(|| pdf_xray_lib::ocr::models::default_model_dir(set)).unwrap_or_else(|| {
         eprintln!("No model folder: pass --models DIR or set PDFXRAY_MODEL_DIR");
         std::process::exit(1)
     });
-    let mut engine = pdf_xray_lib::ocr::load_engine(&dir).unwrap_or_else(|e| {
+    let mut engine = pdf_xray_lib::ocr::load_engine(&dir, set).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
     });
@@ -365,9 +368,19 @@ fn comic_debug_png(rgb: &image::RgbImage, page: &pdf_xray_lib::ocr::OcrPage, lay
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_ocr(img: &str, models: Option<&str>, det_max_side: Option<u32>, ref_file: Option<&str>, dpi: Option<f32>, text_mode: bool, json_out: bool, comic: &ComicArgs) {
+fn run_ocr(
+    img: &str,
+    models: Option<&str>,
+    det_max_side: Option<u32>,
+    set: &pdf_xray_lib::ocr::models::ModelSet,
+    ref_file: Option<&str>,
+    dpi: Option<f32>,
+    text_mode: bool,
+    json_out: bool,
+    comic: &ComicArgs,
+) {
     use pdf_xray_lib::ocr::OcrEngine;
-    let engine = load_engine(models, det_max_side);
+    let engine = load_engine(models, det_max_side, set);
     let rgb = image::open(img)
         .unwrap_or_else(|e| {
             eprintln!("{img}: {e}");
@@ -501,7 +514,8 @@ fn run_eval_ocr(paths: &[String], models: Option<&str>, det_max_side: Option<u32
         eprintln!("No snapshot files given.");
         std::process::exit(1);
     }
-    let engine = load_engine(models, det_max_side);
+    // one engine per model set, loaded when a snapshot needs it
+    let mut engines: std::collections::HashMap<&str, pdf_xray_lib::ocr::paddle::PaddleOcr> = std::collections::HashMap::new();
     let mut results = Vec::new();
     for f in &files {
         let snap: Snapshot = match fs::read_to_string(f).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
@@ -511,7 +525,13 @@ fn run_eval_ocr(paths: &[String], models: Option<&str>, det_max_side: Option<u32
                 continue;
             }
         };
-        match evaluate_ocr(&snap, f, Some(&engine)) {
+        let set = snap
+            .ocr
+            .as_ref()
+            .and_then(|o| pdf_xray_lib::ocr::models::set_for_engine(&o.engine))
+            .unwrap_or(&pdf_xray_lib::ocr::models::LATIN);
+        let engine = engines.entry(set.id).or_insert_with(|| load_engine(models, det_max_side, set));
+        match evaluate_ocr(&snap, f, Some(&*engine)) {
             Ok(Some(r)) => results.push((f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), r)),
             Ok(None) => {}
             Err(e) => eprintln!("skip {}: {}", f.display(), e),

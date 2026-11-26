@@ -35,6 +35,24 @@ runs ─► lines ─► XY-Cut blocks ─► roles ─► reading order ─► 
 
 ## 1. Extraction (`src/extract.js`)
 
+**Documents of page images** (`src/imagedoc.js`): CBZ / zip, a folder of
+images (the *Cartella* button or a dropped folder), several image files.
+They do not go through pdf.js: `ImageDocument` provides the few calls the
+app makes on a pdf.js document (`numPages`, `getPage`, `getViewport`,
+`render`, no outline or structure tree), and `extractPage` returns the page
+input directly (no text, one image covering the page, so the page is
+classified as a scan and OCR'd). Nothing is converted: opening reads the
+list of pages (for a zip its central directory, read by ranges from the end
+of the file, never the whole archive) and the size of each image from its
+header; a page is read and decoded only when it is shown or recognised, and
+the last four decoded pages are kept. Pages are the image entries in natural
+order of their paths ("page2" before "page10"), `__MACOSX` and hidden files
+skipped. The longer side of every page is 792 pt (11 in), so the 300 DPI OCR
+raster is close to the native resolution of good scans. `<Manga>YesAndRightToLeft</Manga>`
+in `ComicInfo.xml` sets the comic reading direction to right-to-left. A new
+format only needs a *source* (`{ name, pages: [{ name, blob() }], info }`);
+CBR (RAR) has none yet.
+
 * **Boxes.** Each run's four corners are computed from its text matrix and the
   font ascent/descent, then mapped through the viewport: rotated and vertical
   text get a correct axis-aligned box. Font size is `|(c, d)|` of the text
@@ -249,6 +267,17 @@ the prevailing direction of its lines). For rotated segments the alignment is
 measured in the reading frame (`fb`), where the lines run horizontally.
 GianoReader uses `rot` to lay out the translation box in the text direction
 and rotate it like the original.
+
+**Machine translation** (`translate.rs`, command `translate_free`). The free
+Google Translate endpoint, as in GianoReader's free mode: GET requests with
+the text in the URL, at most 4 500 UTF-8 bytes each; paragraphs travel in
+batches joined by blank lines and are split back on them — when the engine
+merges lines the batch is re-sent one paragraph at a time; a longer
+paragraph is cut after whitespace or punctuation. The requests run in Rust
+(from the WebView a rate-limit 429 would look like a CORS error). The app
+translates the paragraphs of the page shown, then of every page opened;
+translations are cached by language and paragraph text, so a re-analysis
+that renumbers the paragraphs keeps them.
 
 **Comic balloons.** On comic pages each segment carries its container
 (`balloon`: kind, bounds, `shape`, `fill`). `shape` is the inside of a
